@@ -1,0 +1,52 @@
+Nov 14 08:17:00 srv-lab CRON[1012]: pam_unix(cron:session): session opened for user root by (uid=0)
+Nov 14 08:17:01 srv-lab CRON[1012]: pam_unix(cron:session): session closed for user root
+Nov 14 08:42:08 srv-lab sshd[1021]: Accepted publickey for remi from 192.168.1.20 port 50122 ssh2: ED25519 SHA256:k3Xf9Qw2pLmN8rTz
+Nov 14 08:42:09 srv-lab sshd[1031]: pam_unix(sshd:session): session opened for user remi by (uid=0)
+Nov 14 08:50:00 srv-lab sudo:     remi : TTY=pts/0 ; PWD=/home/remi ; USER=root ; COMMAND=/usr/bin/apt update
+Nov 14 09:05:03 srv-lab sshd[1057]: Failed password for remi from 192.168.1.20 port 50301 ssh2
+Nov 14 09:05:11 srv-lab sshd[1061]: Accepted password for remi from 192.168.1.20 port 50301 ssh2
+Nov 14 10:13:00 srv-lab sshd[1096]: Failed password for root from 203.0.113.45 port 40000 ssh2
+Nov 14 10:13:02 srv-lab sshd[1120]: Failed password for root from 203.0.113.45 port 40002 ssh2
+Nov 14 10:13:04 srv-lab sshd[1153]: Invalid user admin from 203.0.113.45 port 40004
+Nov 14 10:13:05 srv-lab sshd[1167]: Failed password for invalid user admin from 203.0.113.45 port 40004 ssh2
+Nov 14 10:13:06 srv-lab sshd[1173]: Invalid user admin from 203.0.113.45 port 40006
+Nov 14 10:13:07 srv-lab sshd[1201]: Failed password for invalid user admin from 203.0.113.45 port 40006 ssh2
+Nov 14 10:13:10 srv-lab sshd[1258]: Invalid user ubuntu from 203.0.113.45 port 40010
+Nov 14 10:13:11 srv-lab sshd[1286]: Failed password for invalid user ubuntu from 203.0.113.45 port 40010 ssh2
+Nov 14 10:13:12 srv-lab sshd[1323]: Invalid user oracle from 203.0.113.45 port 40012
+Nov 14 10:13:13 srv-lab sshd[1331]: Failed password for invalid user oracle from 203.0.113.45 port 40012 ssh2
+Nov 14 10:13:18 srv-lab sshd[1428]: Invalid user guest from 203.0.113.45 port 40018
+Nov 14 10:13:19 srv-lab sshd[1437]: Failed password for invalid user guest from 203.0.113.45 port 40018 ssh2
+Nov 14 10:13:20 srv-lab sshd[1206]: Invalid user test from 203.0.113.45 port 40008
+Nov 14 10:13:21 srv-lab sshd[1222]: Failed password for invalid user test from 203.0.113.45 port 40008 ssh2
+Nov 14 10:13:21 srv-lab sshd[1369]: Invalid user postgres from 203.0.113.45 port 40014
+Nov 14 10:13:22 srv-lab sshd[1373]: Failed password for invalid user postgres from 203.0.113.45 port 40014 ssh2
+Nov 14 10:13:22 srv-lab sshd[1511]: Failed password for root from 203.0.113.45 port 40022 ssh2
+Nov 14 10:13:26 srv-lab sshd[1597]: Invalid user deploy from 203.0.113.45 port 40026
+Nov 14 10:13:27 srv-lab sshd[1634]: Failed password for invalid user deploy from 203.0.113.45 port 40026 ssh2
+Nov 14 10:13:40 srv-lab sshd[1377]: Invalid user pi from 203.0.113.45 port 40016
+Nov 14 10:13:40 srv-lab sshd[1464]: Invalid user user from 203.0.113.45 port 40020
+Nov 14 10:13:41 srv-lab sshd[1392]: Failed password for invalid user pi from 203.0.113.45 port 40016 ssh2
+Nov 14 10:13:41 srv-lab sshd[1474]: Failed password for invalid user user from 203.0.113.45 port 40020 ssh2
+Nov 14 10:13:42 srv-lab sshd[1658]: Invalid user git from 203.0.113.45 port 40028
+Nov 14 10:13:43 srv-lab sshd[1665]: Failed password for invalid user git from 203.0.113.45 port 40028 ssh2
+Nov 14 10:13:48 srv-lab sshd[1547]: Invalid user ftp from 203.0.113.45 port 40024
+Nov 14 10:13:49 srv-lab sshd[1559]: Failed password for invalid user ftp from 203.0.113.45 port 40024 ssh2
+Nov 14 11:00:00 srv-lab sshd[1701]: Failed password for root from 198.51.100.7 port 51000 ssh2
+Nov 14 11:25:00 srv-lab sshd[1706]: Failed password for root from 198.51.100.7 port 51001 ssh2
+Nov 14 11:50:00 srv-lab sshd[1743]: Failed password for root from 198.51.100.7 port 51002 ssh2
+Nov 14 12:15:00 srv-lab sshd[1747]: Failed password for root from 198.51.100.7 port 51003 ssh2
+Nov 14 13:31:00 srv-lab sshd[1787]: Failed password for backup from 198.51.100.23 port 60100 ssh2
+Nov 14 13:31:03 srv-lab sshd[1801]: Failed password for backup from 198.51.100.23 port 60101 ssh2
+Nov 14 13:31:06 srv-lab sshd[1833]: Failed password for backup from 198.51.100.23 port 60102 ssh2
+Nov 14 13:31:09 srv-lab sshd[1868]: Failed password for backup from 198.51.100.23 port 60103 ssh2
+Nov 14 13:31:12 srv-lab sshd[1896]: Failed password for backup from 198.51.100.23 port 60104 ssh2
+Nov 14 13:31:15 srv-lab sshd[1917]: Failed password for backup from 198.51.100.23 port 60105 ssh2
+Nov 14 13:31:18 srv-lab sshd[1947]: Failed password for backup from 198.51.100.23 port 60106 ssh2
+Nov 14 13:31:21 srv-lab sshd[1985]: Failed password for backup from 198.51.100.23 port 60107 ssh2
+Nov 14 13:31:24 srv-lab sshd[2015]: Failed password for backup from 198.51.100.23 port 60108 ssh2
+Nov 14 13:31:30 srv-lab sshd[2039]: Accepted password for backup from 198.51.100.23 port 60110 ssh2
+Nov 14 13:31:31 srv-lab sshd[2059]: pam_unix(sshd:session): session opened for user backup by (uid=0)
+Nov 14 13:33:00 srv-lab sudo:   backup : user NOT in sudoers ; TTY=pts/1 ; PWD=/home/backup ; USER=root ; COMMAND=/bin/bash
+Nov 14 14:00:00 srv-lab sshd[2075]: Received disconnect from 192.168.1.20 port 50122:11: disconnected by user
+Nov 14 14:17:00 srv-lab CRON[2210]: pam_unix(cron:session): session opened for user root by (uid=0)
