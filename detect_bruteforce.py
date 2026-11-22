@@ -8,8 +8,9 @@ qui échouent trop souvent à se connecter dans un court laps de temps.
 
 Principe :
     1. Lecture du fichier ligne par ligne.
-    2. Pour chaque échec de connexion, extraction de l'IP source,
-       de l'utilisateur visé et de l'heure.
+    2. Pour chaque échec de connexion (mot de passe refusé, utilisateur
+       inexistant, ou utilisateur existant non authentifié), extraction
+       de l'IP source, de l'utilisateur visé et de l'heure.
     3. Pour chaque IP, recherche du plus grand nombre d'échecs
        survenus dans une fenêtre de FENETRE secondes.
     4. Si ce nombre atteint SEUIL : alerte (brute force probable).
@@ -19,8 +20,11 @@ Pourquoi une fenêtre de temps ?
     3 échecs étalés sur une journée = un humain qui se trompe.
     Sans fenêtre, le second cas serait un "faux positif".
 
-Utilisation :
-    python3 detect_bruteforce.py
+Format attendu des logs (rsyslog, dates ISO 8601) :
+    2026-11-20T11:38:07+00:00 ubuntu-01 sshd-session[3478]: Invalid user admin from 192.168.1.29 port 36864
+
+Utilisation (sur le serveur siem) :
+    sudo python3 detect_bruteforce.py
 """
 
 import re                      # expressions régulières, pour extraire l'IP et l'utilisateur
@@ -31,21 +35,36 @@ from datetime import datetime  # pour convertir les dates des logs et calculer d
 # Configuration
 # ---------------------------------------------------------------------------
 
-FICHIER_LOG = "sshd-session.log"  # fichier de logs SSH à analyser
+# Fichier de logs SSH à analyser.
+# Sur le serveur siem : "/var/log/remote/ubuntu-01/sshd-session.log" (lancer avec sudo)
+# Sur le Mac, pour les tests : "sshd-session.log"
+FICHIER_LOG = "sshd-session.log"
 SEUIL = 3                         # nombre d'échecs à partir duquel on lève une alerte
 FENETRE = 60                      # durée de la fenêtre de détection, en secondes
 
-# Capture le "mot" qui suit "from" : c'est l'adresse IP source.
-# Exemple : "... from 192.168.1.20 port 51234" -> "192.168.1.20"
-REGEX_IP = r"from (\S+)"
+# Motifs des lignes d'échec écrites par OpenSSH.
+# Chaque motif capture deux informations grâce à des "groupes nommés" :
+#   (?P<utilisateur>...) -> le nom d'utilisateur visé
+#   (?P<ip>...)          -> l'adresse IP source
+# \S+ signifie "une suite de caractères sans espace" (un mot).
+MOTIFS_ECHEC = [
+    # Mot de passe refusé, pour un utilisateur existant ou non :
+    #   "Failed password for remikaseya from 192.168.1.14 port 49376 ssh2"
+    #   "Failed password for invalid user test from 192.168.1.20 port 51245 ssh2"
+    r"Failed password for (?:invalid user )?(?P<utilisateur>\S+) from (?P<ip>\S+) port",
 
-# Capture le nom d'utilisateur visé. Gère les trois formats d'OpenSSH :
-#   "Failed password for remikaseya from ..."         -> remikaseya
-#   "Invalid user admin from ..."                     -> admin
-#   "Failed password for invalid user test from ..."  -> test
-# Le " from" final sert d'ancre : il évite de capturer le mot "invalid"
-# dans le troisième cas.
-REGEX_UTILISATEUR = r"(?:[Ii]nvalid user|for) (\S+) from"
+    # Utilisateur qui n'existe pas sur la machine :
+    #   "Invalid user admin from 192.168.1.29 port 36864"
+    r"[Ii]nvalid user (?P<utilisateur>\S+) from (?P<ip>\S+) port",
+
+    # Utilisateur qui EXISTE (ex : root), mais qui n'a pas pu s'authentifier.
+    # Comme les mots de passe sont désactivés, OpenSSH n'écrit ni "Invalid user"
+    # ni "Failed password" : sans ce motif, l'attaque passerait inaperçue.
+    # Attention : ici il n'y a pas de "from" avant l'IP.
+    #   "Connection closed by authenticating user root 192.168.1.29 port 51234 [preauth]"
+    #   "Disconnected from authenticating user root 192.168.1.29 port 51234 [preauth]"
+    r"(?:Connection closed by|Disconnected from) authenticating user (?P<utilisateur>\S+) (?P<ip>\S+) port",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +101,24 @@ def max_echecs_dans_fenetre(heures):
 
 
 # ---------------------------------------------------------------------------
+# Analyse d'une ligne de log (le "parseur")
+# ---------------------------------------------------------------------------
+
+def analyser_ligne(ligne):
+    """Si la ligne est un échec de connexion, renvoie (ip, utilisateur). Sinon, renvoie None.
+
+    On essaie chaque motif de MOTIFS_ECHEC l'un après l'autre :
+    dès qu'un motif correspond, on renvoie ce qu'il a capturé.
+    """
+    for motif in MOTIFS_ECHEC:
+        resultat = re.search(motif, ligne)
+        if resultat:
+            return resultat.group("ip"), resultat.group("utilisateur")
+    # Aucun motif ne correspond : ce n'est pas un échec (ex : "Accepted publickey").
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Programme principal
 # ---------------------------------------------------------------------------
 
@@ -96,22 +133,22 @@ def main():
     with open(FICHIER_LOG, "r", encoding="utf-8") as fichier:
         for ligne in fichier:
 
-            # On ne garde que les lignes d'échec de connexion.
-            # Les autres (ex : "Accepted publickey") sont ignorées.
-            if "Failed password" in ligne or "Invalid user" in ligne:
+            # On cherche si la ligne correspond à un échec de connexion.
+            # Les autres lignes (ex : "Accepted publickey") sont ignorées.
+            echec = analyser_ligne(ligne)
+            if echec:
 
-                # Extraction de l'IP source et de l'utilisateur visé.
-                # .group(1) renvoie ce qui a été capturé entre parenthèses dans la regex.
-                ip = re.search(REGEX_IP, ligne).group(1)
-                utilisateur = re.search(REGEX_UTILISATEUR, ligne).group(1)
+                # analyser_ligne() renvoie deux valeurs : on les range dans deux variables.
+                ip, utilisateur = echec
 
-                # Extraction de la date : ce sont les 3 premiers mots de la ligne,
-                # ex : "Nov 20 11:05:22". Le format syslog ne contient pas l'année,
-                # on ajoute donc l'année en cours (obligatoire depuis Python 3.15).
-                # Limite connue : des logs du 31 décembre lus le 1er janvier
-                # seraient datés de la mauvaise année (sans impact sur les écarts).
-                texte_date = f"{datetime.now().year} " + " ".join(ligne.split()[:3])
-                moment = datetime.strptime(texte_date, "%Y %b %d %H:%M:%S")
+                # Extraction de la date : c'est le 1er mot de la ligne.
+                # rsyslog l'écrit au format ISO 8601, ex : "2026-11-20T11:17:28+00:00"
+                # (année, jour, heure et fuseau horaire en un seul bloc).
+                texte_date = ligne.split()[0]
+
+                # fromisoformat() convertit directement ce format en objet datetime,
+                # fuseau horaire compris : pas besoin de décrire le format à la main.
+                moment = datetime.fromisoformat(texte_date)
 
                 # Comptage : get() renvoie 0 si l'IP n'a encore jamais été vue.
                 compteur[ip] = compteur.get(ip, 0) + 1
