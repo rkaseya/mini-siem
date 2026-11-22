@@ -1,6 +1,6 @@
 import time
 from datetime import datetime
-from detect_bruteforce import analyser_ligne, SEUIL, FENETRE, FICHIER_PAR_DEFAUT
+from detect_bruteforce import analyser_ligne, analyser_succes, SEUIL, FENETRE, FICHIER_PAR_DEFAUT
 
 
 def suivre(chemin):
@@ -22,6 +22,25 @@ def main():
     print(f"🔎 Surveillance de {FICHIER_PAR_DEFAUT} (Ctrl+C pour arrêter)")
     try: 
         for ligne in suivre(FICHIER_PAR_DEFAUT):
+            succes = analyser_succes(ligne)
+            if succes:
+                ip, utilisateur, methode = succes
+                moment = datetime.fromisoformat(ligne.split()[0])
+
+         
+                recents = horaires.get(ip, [])
+
+                recents = [h for h in recents if (moment - h).total_seconds() <= FENETRE]
+
+               
+                if len(recents) >= SEUIL:
+                    print(f"🔴 ALERTE CRITIQUE: {ip} a réussi par bruteforce ({methode}) à se connecter à {utilisateur} à {moment:%Y-%m-%d %H:%M:%S} après {len(recents)} échecs!")
+
+                continue   # une ligne de succès n'est pas un échec : on passe à la suivante
+            
+            
+            
+            
             echec = analyser_ligne(ligne)
             if not echec:
                 continue
@@ -49,5 +68,7 @@ def main():
     except KeyboardInterrupt:
         # Ctrl+C : on quitte proprement au lieu d'afficher une erreur
         print("\n🛑 Surveillance arrêtée.")
+
+        
 if __name__ == "__main__":
     main()

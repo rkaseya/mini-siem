@@ -70,6 +70,17 @@ MOTIFS_ECHEC = [
     r"(?:Connection closed by|Disconnected from) authenticating user (?P<utilisateur>\S+) (?P<ip>\S+) port",
 ]
 
+# Connexion réussie : capture la méthode (password, publickey...), l'utilisateur et l'IP.
+#   "Accepted publickey for remikaseya from 192.168.1.14 port 49400 ssh2"
+MOTIF_SUCCES = r"Accepted (?P<methode>\S+) for (?P<utilisateur>\S+) from (?P<ip>\S+) port"
+
+
+def analyser_succes(ligne):
+    """Si la ligne est une connexion réussie, renvoie (ip, utilisateur, methode). Sinon, None."""
+    resultat = re.search(MOTIF_SUCCES, ligne)
+    if resultat:
+        return resultat.group("ip"), resultat.group("utilisateur"), resultat.group("methode")
+    return None
 
 # ---------------------------------------------------------------------------
 # Règle de détection
