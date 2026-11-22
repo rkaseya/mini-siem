@@ -82,21 +82,21 @@ Un robot enchaîne les tentatives en quelques secondes ; un humain qui se trompe
 En haut du script :
 
 ```python
-FICHIER_LOG = "/var/log/remote/ubuntu-01/sshd-session.log"
 SEUIL = 3       # nombre d'échecs déclenchant une alerte
 FENETRE = 60    # durée de la fenêtre, en secondes
 ```
 
-### Lancement (sur `siem`)
+Le fichier à analyser est passé **en argument**. Sans argument, le script lit les logs de `ubuntu-01` sur `siem` (`/var/log/remote/ubuntu-01/sshd-session.log`).
+
+### Lancement sur `siem` (vrais logs)
 ```bash
 sudo python3 detect_bruteforce.py
 ```
 `sudo` est nécessaire pour lire les logs.
 
-### Test local
-Un fichier d'exemple `sshd-session.log` est fourni. Mettre `FICHIER_LOG = "sshd-session.log"`, puis :
+### Test local avec le fichier d'exemple
 ```bash
-python3 detect_bruteforce.py
+python3 detect_bruteforce.py sshd-session.log
 ```
 
 ### Exemple de sortie
@@ -119,7 +119,7 @@ for u in admin root test oracle guest; do ssh -o BatchMode=yes $u@<IP_CIBLE>; do
 
 - **Double comptage possible** : si l'authentification par mot de passe est activée, OpenSSH peut écrire `Invalid user` **et** `Failed password` pour une même tentative.
 - **Analyse ponctuelle** : le script lit le fichier une fois ; il ne surveille pas encore en temps réel.
-- **Une seule source** : un seul fichier de log est analysé à la fois.
+- **Une seule source** : un seul fichier de log est analysé à la fois (choisi en argument).
 - **Liste des utilisateurs** : elle couvre tout l'historique de l'IP, pas uniquement la rafale qui a déclenché l'alerte.
 - **Performance** : l'algorithme de fenêtre est en O(n²). C'est suffisant pour un lab, mais améliorable (liste triée + `break`, ou deux pointeurs).
 - **Format de log** : le parseur attend des dates ISO 8601, telles qu'écrites par rsyslog.

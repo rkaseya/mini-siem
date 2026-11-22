@@ -38,7 +38,7 @@ from datetime import datetime  # pour convertir les dates des logs et calculer d
 # Fichier de logs SSH à analyser.
 # Sur le serveur siem : "/var/log/remote/ubuntu-01/sshd-session.log" (lancer avec sudo)
 # Sur le Mac, pour les tests : "sshd-session.log"
-FICHIER_LOG = "sshd-session.log"
+FICHIER_LOG = "/var/log/remote/ubuntu-01/sshd-session.log"
 SEUIL = 3                         # nombre d'échecs à partir duquel on lève une alerte
 FENETRE = 60                      # durée de la fenêtre de détection, en secondes
 
