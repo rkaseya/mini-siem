@@ -1,5 +1,9 @@
 Nov 20 11:03:10 ubuntu-01 sshd-session[1463]: Failed password for remikaseya from 192.168.1.14 port 49376 ssh2
 Nov 20 11:05:22 ubuntu-01 sshd-session[1502]: Invalid user admin from 192.168.1.20 port 51234
-Nov 20 11:05:25 ubuntu-01 sshd-session[1503]: Invalid user root from 192.168.1.20 port 51240
-Nov 20 11:05:28 ubuntu-01 sshd-session[1504]: Failed password for invalid user test from 192.168.1.20 port 51245 ssh2
+Nov 20 11:05:24 ubuntu-01 sshd-session[1503]: Invalid user root from 192.168.1.20 port 51240
+Nov 20 11:05:27 ubuntu-01 sshd-session[1504]: Invalid user test from 192.168.1.20 port 51245
+Nov 20 11:05:29 ubuntu-01 sshd-session[1505]: Invalid user oracle from 192.168.1.20 port 51250
+Nov 20 09:12:00 ubuntu-01 sshd-session[1601]: Failed password for remikaseya from 192.168.1.30 port 50001 ssh2
+Nov 20 14:40:15 ubuntu-01 sshd-session[1602]: Failed password for remikaseya from 192.168.1.30 port 50002 ssh2
+Nov 20 18:55:42 ubuntu-01 sshd-session[1603]: Failed password for remikaseya from 192.168.1.30 port 50003 ssh2
 Nov 20 11:06:01 ubuntu-01 sshd-session[1510]: Accepted publickey for remikaseya from 192.168.1.14 port 49400 ssh2
