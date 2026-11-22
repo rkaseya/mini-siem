@@ -1,0 +1,21 @@
+[Unit]
+Description=Mini-SIEM - détection de brute force SSH en temps réel
+After=network.target rsyslog.service
+
+[Service]
+Type=simple
+User=minisiem
+Group=adm
+WorkingDirectory=/opt/mini-siem
+ExecStart=/usr/bin/python3 -u /opt/mini-siem/surveillance.py
+Restart=on-failure
+RestartSec=5
+
+# Durcissement : le service ne peut que lire, rien modifier
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

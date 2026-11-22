@@ -23,11 +23,13 @@ Pourquoi une fenêtre de temps ?
 Format attendu des logs (rsyslog, dates ISO 8601) :
     2026-11-20T11:38:07+00:00 ubuntu-01 sshd-session[3478]: Invalid user admin from 192.168.1.29 port 36864
 
-Utilisation (sur le serveur siem) :
-    sudo python3 detect_bruteforce.py
+Utilisation :
+    sudo python3 detect_bruteforce.py                 # sur siem, vrais logs
+    python3 detect_bruteforce.py sshd-session.log     # test avec un autre fichier
 """
 
 import re                      # expressions régulières, pour extraire l'IP et l'utilisateur
+import sys                     # pour lire le fichier à analyser passé en argument
 from datetime import datetime  # pour convertir les dates des logs et calculer des écarts
 
 
@@ -35,10 +37,12 @@ from datetime import datetime  # pour convertir les dates des logs et calculer d
 # Configuration
 # ---------------------------------------------------------------------------
 
-# Fichier de logs SSH à analyser.
-# Sur le serveur siem : "/var/log/remote/ubuntu-01/sshd-session.log" (lancer avec sudo)
-# Sur le Mac, pour les tests : "sshd-session.log"
-FICHIER_LOG = "/var/log/remote/ubuntu-01/sshd-session.log"
+# Fichier de logs SSH à analyser : passé en argument, sinon les vrais logs de siem par défaut.
+#   sudo python3 detect_bruteforce.py                  -> vrais logs (sur siem)
+#   python3 detect_bruteforce.py sshd-session.log      -> fichier de test (sur le Mac)
+# sys.argv est la liste des mots tapés après "python3" : sys.argv[1] est le 1er argument.
+FICHIER_PAR_DEFAUT = "/var/log/remote/ubuntu-01/sshd-session.log"
+FICHIER_LOG = sys.argv[1] if len(sys.argv) > 1 else FICHIER_PAR_DEFAUT
 SEUIL = 3                         # nombre d'échecs à partir duquel on lève une alerte
 FENETRE = 60                      # durée de la fenêtre de détection, en secondes
 

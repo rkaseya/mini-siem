@@ -1,6 +1,6 @@
 # 🛡️ mini-SIEM : détection d'attaques par force brute SSH
 
-Projet personnel de cybersécurité : un **mini-SIEM** écrit en Python, qui analyse des logs SSH centralisés et détecte les attaques par force brute. Il tourne dans un **home lab** monté de zéro, où je joue à la fois l'attaquant (Kali Linux) et le défenseur (collecte et analyse des logs).
+Projet personnel de cybersécurité : un **mini-SIEM** écrit en Python, qui analyse **en temps réel** des logs SSH centralisés et détecte les attaques par force brute. Il tourne dans un **home lab** monté de zéro, où je joue à la fois l'attaquant (Kali Linux) et le défenseur (collecte et analyse des logs).
 
 > Objectif : comprendre de l'intérieur comment fonctionne un SIEM : collecte, parsing, règles de détection, gestion des faux positifs.
 
@@ -20,7 +20,8 @@ Le lab tourne sur un mini PC (Lenovo ThinkCentre M920q) sous **Proxmox VE**, ave
 flowchart LR
     K[kali<br/>attaquant] -- tentatives SSH --> U[ubuntu-01<br/>cible]
     U -- logs auth via rsyslog<br/>TCP 514 --> S[siem<br/>collecteur]
-    S --> D[detect_bruteforce.py<br/>alertes]
+    S --> D[surveillance.py<br/>service systemd]
+    D --> A[🚨 alertes<br/>journal système]
 ```
 
 **Accès distant** : Tailscale, avec Proxmox en *subnet router*. Aucun port n'est ouvert sur la box Internet.
@@ -36,6 +37,19 @@ flowchart LR
 ```
 /var/log/remote/<machine>/<programme>.log
 ```
+
+Les fichiers sont créés en `0640` et les dossiers en `0750`, avec le groupe `adm` : seuls rsyslog et les membres de `adm` peuvent lire les logs.
+
+---
+
+## 📁 Contenu du dépôt
+
+| Fichier | Rôle |
+|---|---|
+| `detect_bruteforce.py` | Parseur, règle de détection et **analyse ponctuelle** d'un fichier de logs |
+| `surveillance.py` | **Surveillance en temps réel** : suit le fichier et alerte au fil de l'eau (réutilise le parseur) |
+| `mini-siem.service` | Unité `systemd` pour faire tourner la surveillance en permanence sur `siem` |
+| `sshd-session.log` | Logs d'exemple pour tester en local |
 
 ---
 
@@ -66,6 +80,20 @@ Le troisième cas est un **angle mort** découvert pendant les tests. Comme les 
 
 Un robot enchaîne les tentatives en quelques secondes ; un humain qui se trompe de mot de passe, non.
 
+### Surveillance en temps réel
+
+`surveillance.py` fonctionne comme un `tail -f` :
+
+1. Il se place à la **fin** du fichier et attend les nouvelles lignes (générateur Python avec `yield`).
+2. À chaque échec, il ajoute l'heure à la liste de l'IP, puis **oublie les échecs sortis de la fenêtre** (fenêtre glissante). La longueur de la liste donne directement le nombre d'échecs récents.
+3. Si ce nombre atteint `SEUIL`, il lève une alerte, **une seule fois par fenêtre et par IP** : pendant une attaque de 100 tentatives, on reçoit une alerte par minute, pas 98.
+
+```
+🚨 [2026-11-22 17:25:12] ALERTE BRUTE FORCE : 192.168.1.29 a échoué 3 fois en moins de 60 s (dernier utilisateur visé : test)
+```
+
+Les heures sont en **UTC**, comme dans les logs : toutes les machines du lab partagent le même fuseau, ce qui facilite la corrélation des événements.
+
 ### Correspondance MITRE ATT&CK
 
 | Technique | Description |
@@ -88,7 +116,7 @@ FENETRE = 60    # durée de la fenêtre, en secondes
 
 Le fichier à analyser est passé **en argument**. Sans argument, le script lit les logs de `ubuntu-01` sur `siem` (`/var/log/remote/ubuntu-01/sshd-session.log`).
 
-### Lancement sur `siem` (vrais logs)
+### Analyse ponctuelle sur `siem` (bilan des vrais logs)
 ```bash
 sudo python3 detect_bruteforce.py
 ```
@@ -99,7 +127,37 @@ sudo python3 detect_bruteforce.py
 python3 detect_bruteforce.py sshd-session.log
 ```
 
-### Exemple de sortie
+### Surveillance en temps réel (manuelle)
+```bash
+sudo python3 surveillance.py
+```
+Arrêt avec `Ctrl+C`.
+
+### Déploiement en service `systemd`
+La surveillance tourne en permanence sur `siem`, démarre avec la machine et redémarre seule en cas de plantage.
+
+```bash
+# Installation des scripts
+sudo mkdir -p /opt/mini-siem
+sudo cp detect_bruteforce.py surveillance.py /opt/mini-siem/
+
+# Compte de service dédié : il peut seulement lire les logs (groupe adm)
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin --groups adm minisiem
+
+# Activation du service
+sudo cp mini-siem.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now mini-siem
+
+# Suivi des alertes
+sudo journalctl -u mini-siem -f
+```
+
+Choix de sécurité :
+- **Moindre privilège** : le service ne tourne pas en `root`, mais sous un compte système sans shell, membre du seul groupe `adm`.
+- **Durcissement systemd** : `ProtectSystem=strict` (système en lecture seule), `ProtectHome=yes`, `PrivateTmp=yes`, `NoNewPrivileges=yes`. Même compromis, le service ne peut rien modifier.
+
+### Exemple de sortie (analyse ponctuelle)
 ```
 ℹ️  192.168.1.14 - 1 échec(s) - utilisateurs : remikaseya
 ⚠️  ALERTE : 192.168.1.20 a échoué 4 fois en moins de 60 secondes (brute force probable) - utilisateurs : admin, root, test, oracle
@@ -118,10 +176,12 @@ for u in admin root test oracle guest; do ssh -o BatchMode=yes $u@<IP_CIBLE>; do
 ## 🚧 Limites connues
 
 - **Double comptage possible** : si l'authentification par mot de passe est activée, OpenSSH peut écrire `Invalid user` **et** `Failed password` pour une même tentative.
-- **Analyse ponctuelle** : le script lit le fichier une fois ; il ne surveille pas encore en temps réel.
+- **Rotation des logs** : `surveillance.py` garde le fichier ouvert ; si le fichier est renommé ou recréé (logrotate), il faut redémarrer le service.
+- **État en mémoire** : les échecs récents sont perdus au redémarrage du service.
+- **Alertes locales** : les alertes ne sont visibles que dans le journal système (`journalctl`), sans notification.
 - **Une seule source** : un seul fichier de log est analysé à la fois (choisi en argument).
 - **Liste des utilisateurs** : elle couvre tout l'historique de l'IP, pas uniquement la rafale qui a déclenché l'alerte.
-- **Performance** : l'algorithme de fenêtre est en O(n²). C'est suffisant pour un lab, mais améliorable (liste triée + `break`, ou deux pointeurs).
+- **Performance** : dans l'analyse ponctuelle, l'algorithme de fenêtre est en O(n²). C'est suffisant pour un lab ; la surveillance en temps réel, elle, utilise une fenêtre glissante bien plus légère.
 - **Format de log** : le parseur attend des dates ISO 8601, telles qu'écrites par rsyslog.
 
 ---
@@ -133,7 +193,7 @@ for u in admin root test oracle guest; do ssh -o BatchMode=yes $u@<IP_CIBLE>; do
 - [x] Détection par seuil et fenêtre de temps
 - [x] Détection des attaques sur des comptes existants
 - [ ] Détection d'une **intrusion réussie** (échecs puis `Accepted`)
-- [ ] Surveillance **en temps réel** + service `systemd`
+- [x] Surveillance **en temps réel** + service `systemd` durci
 - [ ] Nouvelles règles : échecs `sudo`, création d'utilisateur, scan de ports (logs `ufw`)
 - [ ] Stockage des alertes (JSON / SQLite) et notifications
 - [ ] Tableau de bord
@@ -142,6 +202,6 @@ for u in admin root test oracle guest; do ssh -o BatchMode=yes $u@<IP_CIBLE>; do
 
 ## 🧠 Compétences mobilisées
 
-- **Systèmes & réseau** : Proxmox VE, Linux (Ubuntu, Kali), SSH, adressage IP, DHCP, VPN (Tailscale)
-- **Sécurité** : durcissement SSH, pare-feu `ufw`, reconnaissance `nmap`, centralisation de logs, ingénierie de détection, faux positifs, MITRE ATT&CK
-- **Développement** : Python (expressions régulières, `datetime`, structures de données), Git / GitHub
+- **Systèmes & réseau** : Proxmox VE, Linux (Ubuntu, Kali), SSH, `systemd`, droits Unix, adressage IP, DHCP, VPN (Tailscale)
+- **Sécurité** : durcissement SSH, pare-feu `ufw`, reconnaissance `nmap`, centralisation de logs, ingénierie de détection, faux positifs, moindre privilège, MITRE ATT&CK
+- **Développement** : Python (expressions régulières, `datetime`, structures de données, générateurs, modules), Git / GitHub
