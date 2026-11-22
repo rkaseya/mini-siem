@@ -22,6 +22,7 @@ flowchart LR
     U -- logs auth via rsyslog<br/>TCP 514 --> S[siem<br/>collecteur]
     S --> D[surveillance.py<br/>service systemd]
     D --> A[🚨 alertes<br/>journal système]
+    D -- HTTPS --> N[📱 téléphone<br/>notifications ntfy]
 ```
 
 **Accès distant** : Tailscale, avec Proxmox en *subnet router*. Aucun port n'est ouvert sur la box Internet.
@@ -47,8 +48,8 @@ Les fichiers sont créés en `0640` et les dossiers en `0750`, avec le groupe `a
 | Fichier | Rôle |
 |---|---|
 | `detect_bruteforce.py` | Parseur, règle de détection et **analyse ponctuelle** d'un fichier de logs |
-| `surveillance.py` | **Surveillance en temps réel** : suit le fichier et alerte au fil de l'eau (brute force 🚨 et compromission 🔴) |
-| `mini-siem.service` | Unité `systemd` pour faire tourner la surveillance en permanence sur `siem` |
+| `surveillance.py` | **Surveillance en temps réel** : suit le fichier, alerte au fil de l'eau (brute force 🚨 et compromission 🔴) et envoie des notifications |
+| `mini-siem.service` | Unité `systemd` pour faire tourner la surveillance en permanence sur `siem` (sujet ntfy à personnaliser) |
 | `sshd-session.log` | Logs d'exemple pour tester en local |
 
 ---
@@ -109,6 +110,20 @@ La **méthode** d'authentification fait partie de l'alerte, car elle oriente l'e
 
 La règle utilise le même seuil que le brute force : une simple faute de frappe avant une connexion légitime ne déclenche pas d'alerte critique.
 
+### Notifications sur téléphone
+
+Chaque alerte est aussi envoyée sur le téléphone via [ntfy](https://ntfy.sh), un service de notifications open source : une simple requête HTTPS suffit, sans bibliothèque externe (`urllib` de la bibliothèque standard).
+
+| Alerte | Priorité ntfy | Effet sur le téléphone |
+|---|---|---|
+| 🚨 Brute force | `high` | Notification visible et sonore |
+| 🔴 Compromission | `urgent` | Notification insistante |
+
+Choix de conception :
+- **Le secret reste hors du code** : le sujet ntfy fonctionne comme un mot de passe (quiconque le connaît peut lire ou envoyer des alertes). Il est lu dans la variable d'environnement `NTFY_TOPIC`, définie dans le service `systemd`, et n'apparaît jamais dans le dépôt.
+- **La surveillance ne dépend pas des notifications** : en cas de panne réseau ou d'indisponibilité de ntfy, l'erreur est journalisée et la détection continue.
+- **Pas d'échec silencieux** : au démarrage, le service indique si les notifications sont actives (`📱 Notifications ntfy activées`) ou non (`⚠️ NTFY_TOPIC non défini`). Un SIEM qui n'envoie pas ses alertes sans le signaler donnerait une fausse impression de sécurité.
+
 ### Correspondance MITRE ATT&CK
 
 | Technique | Description |
@@ -160,7 +175,7 @@ sudo cp detect_bruteforce.py surveillance.py /opt/mini-siem/
 # Compte de service dédié : il peut seulement lire les logs (groupe adm)
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin --groups adm minisiem
 
-# Activation du service
+# Activation du service (après avoir remplacé NTFY_TOPIC par votre sujet)
 sudo cp mini-siem.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now mini-siem
@@ -172,6 +187,20 @@ sudo journalctl -u mini-siem -f
 Choix de sécurité :
 - **Moindre privilège** : le service ne tourne pas en `root`, mais sous un compte système sans shell, membre du seul groupe `adm`.
 - **Durcissement systemd** : `ProtectSystem=strict` (système en lecture seule), `ProtectHome=yes`, `PrivateTmp=yes`, `NoNewPrivileges=yes`. Même compromis, le service ne peut rien modifier.
+
+### Activer les notifications
+1. Installer l'app **ntfy** sur le téléphone.
+2. Générer un sujet difficile à deviner :
+   ```bash
+   echo "mini-siem-$(openssl rand -hex 6)"
+   ```
+3. S'abonner à ce sujet dans l'app, puis le renseigner dans le service :
+   ```bash
+   sudo systemctl edit --full mini-siem    # ligne Environment=NTFY_TOPIC=...
+   sudo systemctl daemon-reload
+   sudo systemctl restart mini-siem
+   ```
+4. Vérifier : `sudo journalctl -u mini-siem -n 5` doit afficher `📱 Notifications ntfy activées`.
 
 ### Exemple de sortie (analyse ponctuelle)
 ```
@@ -202,7 +231,8 @@ Résultat attendu dans `journalctl -u mini-siem -f` : une alerte 🚨 puis une a
 - **Double comptage possible** : si l'authentification par mot de passe est activée, OpenSSH peut écrire `Invalid user` **et** `Failed password` pour une même tentative.
 - **Rotation des logs** : `surveillance.py` garde le fichier ouvert ; si le fichier est renommé ou recréé (logrotate), il faut redémarrer le service.
 - **État en mémoire** : les échecs récents sont perdus au redémarrage du service.
-- **Alertes locales** : les alertes ne sont visibles que dans le journal système (`journalctl`), sans notification.
+- **Notifications via un serveur public** : le serveur `ntfy.sh` est tiers ; les alertes (IP internes, noms d'utilisateur) y transitent. En production, il faudrait héberger son propre serveur ntfy ou protéger le sujet par authentification.
+- **Notifications dépendantes d'Internet** : si `siem` perd l'accès à Internet, les alertes restent dans le journal mais n'arrivent plus sur le téléphone.
 - **Attribution derrière un NAT** : les connexions qui passent par Tailscale sont « masquées » par Proxmox (SNAT) et apparaissent avec l'IP `192.168.1.200`. Le SIEM ne voit alors pas l'IP réelle de la source, un problème classique derrière les VPN, proxys et load balancers.
 - **Fenêtre de compromission courte** : un succès n'est relié qu'aux échecs des `FENETRE` dernières secondes ; un attaquant qui patiente avant de se connecter avec l'accès trouvé passerait inaperçu.
 - **Une seule source** : un seul fichier de log est analysé à la fois (choisi en argument).
@@ -221,7 +251,8 @@ Résultat attendu dans `journalctl -u mini-siem -f` : une alerte 🚨 puis une a
 - [x] Détection d'une **intrusion réussie** (échecs puis `Accepted`)
 - [x] Surveillance **en temps réel** + service `systemd` durci
 - [ ] Nouvelles règles : échecs `sudo`, création d'utilisateur, scan de ports (logs `ufw`)
-- [ ] Stockage des alertes (JSON / SQLite) et notifications
+- [x] Notifications sur téléphone (ntfy)
+- [ ] Stockage des alertes (JSON / SQLite)
 - [ ] Tableau de bord
 
 ---
@@ -229,5 +260,5 @@ Résultat attendu dans `journalctl -u mini-siem -f` : une alerte 🚨 puis une a
 ## 🧠 Compétences mobilisées
 
 - **Systèmes & réseau** : Proxmox VE, Linux (Ubuntu, Kali), SSH, `systemd`, droits Unix, adressage IP, DHCP, VPN (Tailscale)
-- **Sécurité** : durcissement SSH, pare-feu `ufw`, reconnaissance `nmap`, centralisation de logs, ingénierie de détection, faux positifs, moindre privilège, MITRE ATT&CK
-- **Développement** : Python (expressions régulières, `datetime`, structures de données, générateurs, modules), Git / GitHub
+- **Sécurité** : durcissement SSH, pare-feu `ufw`, reconnaissance `nmap`, centralisation de logs, ingénierie de détection, faux positifs, moindre privilège, gestion des secrets, MITRE ATT&CK
+- **Développement** : Python (expressions régulières, `datetime`, structures de données, générateurs, modules, requêtes HTTP, gestion d'erreurs), variables d'environnement, Git / GitHub

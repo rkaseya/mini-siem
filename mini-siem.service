@@ -11,6 +11,11 @@ ExecStart=/usr/bin/python3 -u /opt/mini-siem/surveillance.py
 Restart=on-failure
 RestartSec=5
 
+# Notifications ntfy : sujet à remplacer par le vôtre sur le serveur.
+# Le sujet sert de "mot de passe" : ne jamais publier le vrai dans le dépôt.
+# Générer un sujet aléatoire : echo "mini-siem-$(openssl rand -hex 6)"
+Environment=NTFY_TOPIC=remplacer-par-votre-sujet
+
 # Durcissement : le service ne peut que lire, rien modifier
 NoNewPrivileges=yes
 ProtectSystem=strict
