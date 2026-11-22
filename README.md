@@ -1,6 +1,6 @@
 # 🛡️ mini-SIEM : détection d'attaques par force brute SSH
 
-Projet personnel de cybersécurité : un **mini-SIEM** écrit en Python, qui analyse **en temps réel** des logs SSH centralisés et détecte les attaques par force brute. Il tourne dans un **home lab** monté de zéro, où je joue à la fois l'attaquant (Kali Linux) et le défenseur (collecte et analyse des logs).
+Projet personnel de cybersécurité : un **mini-SIEM** écrit en Python, qui analyse **en temps réel** des logs SSH centralisés et détecte les attaques par force brute, ainsi que les **compromissions** (brute force suivi d'une connexion réussie). Il tourne dans un **home lab** monté de zéro, où je joue à la fois l'attaquant (Kali Linux) et le défenseur (collecte et analyse des logs).
 
 > Objectif : comprendre de l'intérieur comment fonctionne un SIEM : collecte, parsing, règles de détection, gestion des faux positifs.
 
@@ -47,7 +47,7 @@ Les fichiers sont créés en `0640` et les dossiers en `0750`, avec le groupe `a
 | Fichier | Rôle |
 |---|---|
 | `detect_bruteforce.py` | Parseur, règle de détection et **analyse ponctuelle** d'un fichier de logs |
-| `surveillance.py` | **Surveillance en temps réel** : suit le fichier et alerte au fil de l'eau (réutilise le parseur) |
+| `surveillance.py` | **Surveillance en temps réel** : suit le fichier et alerte au fil de l'eau (brute force 🚨 et compromission 🔴) |
 | `mini-siem.service` | Unité `systemd` pour faire tourner la surveillance en permanence sur `siem` |
 | `sshd-session.log` | Logs d'exemple pour tester en local |
 
@@ -57,7 +57,7 @@ Les fichiers sont créés en `0640` et les dossiers en `0750`, avec le groupe `a
 
 `detect_bruteforce.py` procède en trois étapes :
 
-1. **Parsing** : chaque ligne est comparée à une liste de motifs d'échec (`MOTIFS_ECHEC`). Si elle correspond, on extrait l'**IP source**, l'**utilisateur visé** et l'**horodatage** (ISO 8601).
+1. **Parsing** : chaque ligne est comparée à une liste de motifs d'échec (`MOTIFS_ECHEC`) et à un motif de connexion réussie (`MOTIF_SUCCES`). Si elle correspond, on extrait l'**IP source**, l'**utilisateur visé** et l'**horodatage** (ISO 8601).
 2. **Agrégation** : pour chaque IP, on stocke le nombre d'échecs, les utilisateurs tentés et les heures d'échec.
 3. **Détection** : pour chaque IP, on cherche le plus grand nombre d'échecs survenus dans une **fenêtre glissante** de `FENETRE` secondes. S'il atteint `SEUIL`, une alerte est levée.
 
@@ -68,6 +68,7 @@ Les fichiers sont créés en `0640` et les dossiers en `0750`, avec le groupe `a
 | Mot de passe refusé | `Failed password for remikaseya from 192.168.1.14 port 49376 ssh2` |
 | Utilisateur inexistant | `Invalid user admin from 192.168.1.29 port 36864` |
 | Utilisateur **existant** non authentifié | `Connection closed by authenticating user root 192.168.1.29 port 51234 [preauth]` |
+| Connexion **réussie** | `Accepted publickey for remikaseya from 192.168.1.14 port 49400 ssh2` |
 
 Le troisième cas est un **angle mort** découvert pendant les tests. Comme les mots de passe sont désactivés, une attaque sur un compte qui existe (`root`) ne produit ni `Invalid user` ni `Failed password` : elle passait inaperçue. C'est pourtant l'attaque la plus dangereuse.
 
@@ -94,6 +95,20 @@ Un robot enchaîne les tentatives en quelques secondes ; un humain qui se trompe
 
 Les heures sont en **UTC**, comme dans les logs : toutes les machines du lab partagent le même fuseau, ce qui facilite la corrélation des événements.
 
+### Règle critique : compromission après brute force
+
+Un brute force qui échoue est une tentative. Un brute force **suivi d'une connexion réussie** depuis la même IP signifie probablement que l'attaquant a trouvé un accès valide et **est entré** dans la machine.
+
+À chaque connexion réussie (`Accepted`), `surveillance.py` regarde les échecs récents de l'IP. S'il y en a au moins `SEUIL` dans les `FENETRE` dernières secondes, il lève une **alerte critique** :
+
+```
+🔴 ALERTE CRITIQUE: 192.168.1.14 a réussi par bruteforce (publickey) à se connecter à remikaseya à 2026-11-22 17:58:42 après 3 échecs!
+```
+
+La **méthode** d'authentification fait partie de l'alerte, car elle oriente l'enquête : `password` après un brute force indique un mot de passe deviné ; `publickey` est plus inhabituel et peut signaler une clé volée.
+
+La règle utilise le même seuil que le brute force : une simple faute de frappe avant une connexion légitime ne déclenche pas d'alerte critique.
+
 ### Correspondance MITRE ATT&CK
 
 | Technique | Description |
@@ -101,6 +116,7 @@ Les heures sont en **UTC**, comme dans les logs : toutes les machines du lab par
 | [T1110 – Brute Force](https://attack.mitre.org/techniques/T1110/) | Tentatives répétées d'authentification |
 | [T1110.001 – Password Guessing](https://attack.mitre.org/techniques/T1110/001/) | Essais de mots de passe sur des comptes |
 | [T1110.003 – Password Spraying](https://attack.mitre.org/techniques/T1110/003/) | Un même essai sur plusieurs comptes (`admin`, `root`, `test`…) |
+| [T1078 – Valid Accounts](https://attack.mitre.org/techniques/T1078/) | Connexion avec un compte légitime après un brute force (alerte critique 🔴) |
 
 ---
 
@@ -169,6 +185,14 @@ Choix de sécurité :
 ```bash
 for u in admin root test oracle guest; do ssh -o BatchMode=yes $u@<IP_CIBLE>; done
 ```
+
+### Simuler une compromission
+Depuis une machine qui possède une clé autorisée sur la cible : quelques échecs, puis une connexion réussie depuis la même IP.
+```bash
+for u in admin test oracle; do ssh -o BatchMode=yes $u@<IP_CIBLE>; done
+ssh <utilisateur>@<IP_CIBLE>
+```
+Résultat attendu dans `journalctl -u mini-siem -f` : une alerte 🚨 puis une alerte 🔴.
 ⚠️ À utiliser uniquement sur ses propres machines.
 
 ---
@@ -179,6 +203,8 @@ for u in admin root test oracle guest; do ssh -o BatchMode=yes $u@<IP_CIBLE>; do
 - **Rotation des logs** : `surveillance.py` garde le fichier ouvert ; si le fichier est renommé ou recréé (logrotate), il faut redémarrer le service.
 - **État en mémoire** : les échecs récents sont perdus au redémarrage du service.
 - **Alertes locales** : les alertes ne sont visibles que dans le journal système (`journalctl`), sans notification.
+- **Attribution derrière un NAT** : les connexions qui passent par Tailscale sont « masquées » par Proxmox (SNAT) et apparaissent avec l'IP `192.168.1.200`. Le SIEM ne voit alors pas l'IP réelle de la source, un problème classique derrière les VPN, proxys et load balancers.
+- **Fenêtre de compromission courte** : un succès n'est relié qu'aux échecs des `FENETRE` dernières secondes ; un attaquant qui patiente avant de se connecter avec l'accès trouvé passerait inaperçu.
 - **Une seule source** : un seul fichier de log est analysé à la fois (choisi en argument).
 - **Liste des utilisateurs** : elle couvre tout l'historique de l'IP, pas uniquement la rafale qui a déclenché l'alerte.
 - **Performance** : dans l'analyse ponctuelle, l'algorithme de fenêtre est en O(n²). C'est suffisant pour un lab ; la surveillance en temps réel, elle, utilise une fenêtre glissante bien plus légère.
@@ -192,7 +218,7 @@ for u in admin root test oracle guest; do ssh -o BatchMode=yes $u@<IP_CIBLE>; do
 - [x] Centralisation des logs avec rsyslog
 - [x] Détection par seuil et fenêtre de temps
 - [x] Détection des attaques sur des comptes existants
-- [ ] Détection d'une **intrusion réussie** (échecs puis `Accepted`)
+- [x] Détection d'une **intrusion réussie** (échecs puis `Accepted`)
 - [x] Surveillance **en temps réel** + service `systemd` durci
 - [ ] Nouvelles règles : échecs `sudo`, création d'utilisateur, scan de ports (logs `ufw`)
 - [ ] Stockage des alertes (JSON / SQLite) et notifications
