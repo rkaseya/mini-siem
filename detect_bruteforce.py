@@ -74,6 +74,10 @@ MOTIFS_ECHEC = [
 #   "Accepted publickey for remikaseya from 192.168.1.14 port 49400 ssh2"
 MOTIF_SUCCES = r"Accepted (?P<methode>\S+) for (?P<utilisateur>\S+) from (?P<ip>\S+) port"
 
+# Paquet bloqué par le pare-feu ufw (log du noyau) : capture l'IP source et le port visé.
+#   "... kernel: [UFW BLOCK] IN=ens18 ... SRC=192.168.1.29 DST=192.168.1.28 ... PROTO=TCP SPT=64354 DPT=23 ..."
+# ".*?" saute tous les champs intermédiaires, jusqu'au prochain élément cherché.
+MOTIF_SCAN = r"\[UFW BLOCK\].*? SRC=(?P<ip>\S+) .*?PROTO=(?:TCP|UDP) SPT=\d+ DPT=(?P<port>\d+)"
 
 def analyser_succes(ligne):
     """Si la ligne est une connexion réussie, renvoie (ip, utilisateur, methode). Sinon, None."""
@@ -82,6 +86,13 @@ def analyser_succes(ligne):
         return resultat.group("ip"), resultat.group("utilisateur"), resultat.group("methode")
     return None
 
+
+def analyser_scan(ligne):
+    """Si la ligne est un paquet bloqué par ufw, renvoie (ip, port). Sinon, None."""
+    resultat = re.search(MOTIF_SCAN, ligne)
+    if resultat:
+        return resultat.group("ip"), int(resultat.group("port"))
+    return None
 # ---------------------------------------------------------------------------
 # Règle de détection
 # ---------------------------------------------------------------------------

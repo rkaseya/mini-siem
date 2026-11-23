@@ -4,7 +4,10 @@ import urllib.request
 import sqlite3
 from datetime import datetime
 from detect_bruteforce import analyser_ligne, analyser_succes, SEUIL, FENETRE, FICHIER_PAR_DEFAUT
+from detect_bruteforce import analyser_ligne, analyser_succes, analyser_scan, SEUIL, FENETRE, FICHIER_PAR_DEFAUT
 
+FICHIER_PARE_FEU = "/var/log/remote/ubuntu-01/kernel.log"
+SEUIL_PORTS = 3  # nombre de ports DIFFÉRENTS bloqués en FENETRE secondes pour parler de scan
 
 # Sujet ntfy lu dans l'environnement (défini dans mini-siem.service), jamais dans le code
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC")
@@ -51,6 +54,26 @@ def suivre(chemin):
             yield ligne                 # on "donne" la ligne à la boucle qui nous appelle
 
 
+def suivre_plusieurs(chemins):
+    """Comme suivre(), mais pour plusieurs fichiers à la fois (lus à tour de rôle)."""
+    fichiers = [open(chemin, "r", encoding="utf-8") for chemin in chemins]
+    for fichier in fichiers:
+        fichier.seek(0, 2)                  # fin de chaque fichier : on ignore l'historique
+    try:
+        while True:
+            nouvelle_ligne = False
+            for fichier in fichiers:
+                ligne = fichier.readline()
+                if ligne:
+                    nouvelle_ligne = True
+                    yield ligne
+            if not nouvelle_ligne:          # aucun fichier n'a de nouvelle ligne...
+                time.sleep(1)               # ...on attend avant de réessayer
+    finally:
+        for fichier in fichiers:            # à l'arrêt (Ctrl+C), on referme proprement
+            fichier.close()
+
+
 def notifier(titre, message, priorite="default", tags=""):
     """Envoie une notification sur le téléphone via ntfy. N'interrompt jamais la surveillance."""
     headers={"Title": titre, "Priority": priorite, "Tags": tags, "User-Agent": "mini-siem"}
@@ -71,6 +94,8 @@ def notifier(titre, message, priorite="default", tags=""):
 def main():
     horaires = {}         # IP -> heures des échecs RÉCENTS (dans la fenêtre)
     derniere_alerte = {}  # IP -> moment de la dernière alerte (anti-répétition)
+    scans = {}                 # IP -> liste de (moment, port) des blocages récents
+    derniere_alerte_scan = {}  # IP -> moment de la dernière alerte de scan
     initialiser_base()
     print(f"🔎 Surveillance de {FICHIER_PAR_DEFAUT} (Ctrl+C pour arrêter)")
     if NTFY_TOPIC:
@@ -78,8 +103,36 @@ def main():
     else:
         print("⚠️  NTFY_TOPIC non défini : notifications désactivées")
     try: 
-        for ligne in suivre(FICHIER_PAR_DEFAUT):
+        for ligne in suivre_plusieurs([FICHIER_PAR_DEFAUT, FICHIER_PARE_FEU]):
             succes = analyser_succes(ligne)
+            scan = analyser_scan(ligne)
+            if scan:
+                ip, port = scan
+                moment = datetime.fromisoformat(ligne.split()[0])
+
+                
+                if ip not in scans:
+                    scans[ip] = []
+
+                scans[ip].append((moment,port))
+
+                scans[ip] = [(m,p) for (m,p) in scans[ip] if (moment - m).total_seconds() <= FENETRE]
+
+                ensemble = {p for (m, p) in scans[ip]}
+
+                if len(ensemble) >= SEUIL_PORTS:
+                    derniere = derniere_alerte_scan.get(ip)
+                    if derniere is None or (moment - derniere).total_seconds() > FENETRE:
+                        liste_ports = ", ".join(str(p) for p in sorted(ensemble))
+                        message_alerte_scan = (f"🔍 [{moment:%Y-%m-%d %H:%M:%S}] SCAN DE PORTS : "
+                                               f"{ip} a tenté {len(ensemble)} ports différents "
+                                               f"en moins de {FENETRE} s ({liste_ports})")
+                        print(message_alerte_scan)
+                        notifier("Scan de ports", message_alerte_scan, "high", "mag")
+                        enregistrer_alerte(moment, "scan_ports", ip, None, len(ensemble), None, message_alerte_scan)
+                        derniere_alerte_scan[ip] = moment
+                continue
+
             if succes:
                 ip, utilisateur, methode = succes
                 moment = datetime.fromisoformat(ligne.split()[0])
