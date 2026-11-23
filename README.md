@@ -57,15 +57,15 @@ Les fichiers sont créés en `0640` et les dossiers en `0750`, avec le groupe `a
 
 | Fichier | Rôle |
 |---|---|
-| `detect_bruteforce.py` | Parseur, règle de détection et **analyse ponctuelle** d'un fichier de logs |
-| `surveillance.py` | **Surveillance en temps réel** : suit le fichier, alerte au fil de l'eau (brute force 🚨 et compromission 🔴) et envoie des notifications |
+| `detect_bruteforce.py` | **Parseur** partagé (échecs, succès, blocages pare-feu) et **analyse ponctuelle** d'un fichier de logs |
+| `surveillance.py` | **Surveillance en temps réel** : suit les logs SSH et pare-feu, alerte au fil de l'eau (🚨 brute force, 🔴 compromission, 🔍 scan de ports), notifie et enregistre |
 | `mini-siem.service` | Unité `systemd` pour faire tourner la surveillance en permanence sur `siem` (sujet ntfy à personnaliser) |
 | `dashboard.py` | **Tableau de bord web** (Flask) : compteurs, top des IP, dernières alertes, graphique |
 | `templates/dashboard.html` | Page HTML du tableau de bord (graphique Chart.js) |
 | `mini-siem-dashboard.service` | Unité `systemd` du tableau de bord (Gunicorn, compte dédié en lecture seule) |
 | `outils/generer_alertes_test.py` | Génère une base d'alertes **fictives** pour développer le tableau de bord en local |
 | `docs/dashboard.png` | Capture d'écran du tableau de bord |
-| `sshd-session.log` | Logs d'exemple pour tester en local |
+| `samples/sshd-session.log` | Logs SSH d'exemple pour tester l'analyse ponctuelle en local |
 
 ---
 
@@ -119,7 +119,7 @@ Un brute force qui échoue est une tentative. Un brute force **suivi d'une conne
 À chaque connexion réussie (`Accepted`), `surveillance.py` regarde les échecs récents de l'IP. S'il y en a au moins `SEUIL` dans les `FENETRE` dernières secondes, il lève une **alerte critique** :
 
 ```
-🔴 ALERTE CRITIQUE: 192.168.1.14 a réussi par bruteforce (publickey) à se connecter à remikaseya à 2026-11-22 17:58:42 après 3 échecs!
+🔴 [2026-11-22 17:58:42] ALERTE CRITIQUE : 192.168.1.14 s'est connecté en tant que remikaseya (publickey) après 3 échecs en moins de 60 s
 ```
 
 La **méthode** d'authentification fait partie de l'alerte, car elle oriente l'enquête : `password` après un brute force indique un mot de passe deviné ; `publickey` est plus inhabituel et peut signaler une clé volée.
@@ -238,7 +238,7 @@ sudo python3 detect_bruteforce.py
 
 ### Test local avec le fichier d'exemple
 ```bash
-python3 detect_bruteforce.py sshd-session.log
+python3 detect_bruteforce.py samples/sshd-session.log
 ```
 
 ### Surveillance en temps réel (manuelle)

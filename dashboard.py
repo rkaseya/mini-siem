@@ -10,7 +10,8 @@ La base est ouverte en LECTURE SEULE : le tableau de bord ne peut ni modifier
 ni supprimer une alerte, même en cas de bug ou de faille.
 
 Utilisation :
-    python3 dashboard.py          puis ouvrir http://127.0.0.1:5000
+    python3 dashboard.py          puis ouvrir http://127.0.0.1:5000   (développement)
+    gunicorn ... dashboard:app    en production, voir mini-siem-dashboard.service
 """
 
 import os
@@ -42,12 +43,7 @@ def requete(sql, parametres=()):
 def accueil():
     """Page principale du tableau de bord."""
 
-    # Valeurs par défaut : la page s'affiche même tant que les requêtes ne sont pas écrites
-    compteurs = {"total": 0, "brute_force": 0, "compromission": 0, "scan_ports": 0}
-    top_ip = []
-    dernieres = []
-    par_jour = []
-
+    # Compteurs : SUM(type = '...') compte les lignes de ce type (une comparaison vaut 1 ou 0)
     compteurs = requete("""
         SELECT COUNT(*)                    AS total,
                SUM(type = 'brute_force')   AS brute_force,
@@ -56,6 +52,7 @@ def accueil():
         FROM alertes
     """)[0]
 
+    # Top 5 des IP les plus actives (GROUP BY : une ligne par IP)
     top_ip = requete("""
         SELECT ip, COUNT(*) AS nb, MAX(moment) AS derniere
         FROM alertes
@@ -64,6 +61,7 @@ def accueil():
         LIMIT 5
     """)
 
+    # 20 dernières alertes, de la plus récente à la plus ancienne
     dernieres = requete("""
         SELECT moment, type, ip, utilisateur, nb_echecs, methode
         FROM alertes
@@ -71,6 +69,8 @@ def accueil():
         LIMIT 20
     """)
 
+    # Nombre d'alertes par jour, dans l'ordre chronologique (pour le graphique)
+    # substr(moment, 1, 10) garde la date seule : "2026-11-23T17:12:01+00:00" -> "2026-11-23"
     par_jour = requete("""
         SELECT substr(moment, 1, 10) AS jour, COUNT(*) AS nb
         FROM alertes

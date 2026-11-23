@@ -1,12 +1,19 @@
 """
-detect_bruteforce.py - Détecteur d'attaques par force brute SSH
-================================================================
+detect_bruteforce.py - Parseur des logs et analyse ponctuelle du mini-SIEM
+===========================================================================
 
-Ce script fait partie de mon mini-SIEM. Il lit un fichier de logs SSH
-(produit par OpenSSH et centralisé avec rsyslog) et repère les adresses IP
-qui échouent trop souvent à se connecter dans un court laps de temps.
+Ce module a deux rôles :
 
-Principe :
+1. **Parseur partagé** : les fonctions analyser_ligne(), analyser_succes() et
+   analyser_scan() reconnaissent les lignes intéressantes des logs (échecs SSH,
+   connexions réussies, paquets bloqués par le pare-feu). Elles sont aussi
+   utilisées par surveillance.py, la surveillance en temps réel.
+
+2. **Analyse ponctuelle** : lancé directement, le script lit un fichier de logs
+   SSH en entier et fait le bilan des adresses IP qui ont échoué trop souvent
+   à se connecter dans un court laps de temps.
+
+Principe de l'analyse ponctuelle :
     1. Lecture du fichier ligne par ligne.
     2. Pour chaque échec de connexion (mot de passe refusé, utilisateur
        inexistant, ou utilisateur existant non authentifié), extraction
@@ -24,8 +31,8 @@ Format attendu des logs (rsyslog, dates ISO 8601) :
     2026-11-20T11:38:07+00:00 ubuntu-01 sshd-session[3478]: Invalid user admin from 192.168.1.29 port 36864
 
 Utilisation :
-    sudo python3 detect_bruteforce.py                 # sur siem, vrais logs
-    python3 detect_bruteforce.py sshd-session.log     # test avec un autre fichier
+    sudo python3 detect_bruteforce.py                         # sur siem, vrais logs
+    python3 detect_bruteforce.py samples/sshd-session.log     # test avec le fichier d'exemple
 """
 
 import re                      # expressions régulières, pour extraire l'IP et l'utilisateur
@@ -37,14 +44,17 @@ from datetime import datetime  # pour convertir les dates des logs et calculer d
 # Configuration
 # ---------------------------------------------------------------------------
 
-# Fichier de logs SSH à analyser : passé en argument, sinon les vrais logs de siem par défaut.
-#   sudo python3 detect_bruteforce.py                  -> vrais logs (sur siem)
-#   python3 detect_bruteforce.py sshd-session.log      -> fichier de test (sur le Mac)
-# sys.argv est la liste des mots tapés après "python3" : sys.argv[1] est le 1er argument.
+# Fichier de logs SSH analysé par défaut (sur siem). Un autre fichier peut être
+# passé en argument au lancement (voir main()).
 FICHIER_PAR_DEFAUT = "/var/log/remote/ubuntu-01/sshd-session.log"
-FICHIER_LOG = sys.argv[1] if len(sys.argv) > 1 else FICHIER_PAR_DEFAUT
-SEUIL = 3                         # nombre d'échecs à partir duquel on lève une alerte
-FENETRE = 60                      # durée de la fenêtre de détection, en secondes
+
+SEUIL = 3      # nombre d'échecs à partir duquel on lève une alerte
+FENETRE = 60   # durée de la fenêtre de détection, en secondes
+
+
+# ---------------------------------------------------------------------------
+# Motifs reconnus dans les logs
+# ---------------------------------------------------------------------------
 
 # Motifs des lignes d'échec écrites par OpenSSH.
 # Chaque motif capture deux informations grâce à des "groupes nommés" :
@@ -77,7 +87,37 @@ MOTIF_SUCCES = r"Accepted (?P<methode>\S+) for (?P<utilisateur>\S+) from (?P<ip>
 # Paquet bloqué par le pare-feu ufw (log du noyau) : capture l'IP source et le port visé.
 #   "... kernel: [UFW BLOCK] IN=ens18 ... SRC=192.168.1.29 DST=192.168.1.28 ... PROTO=TCP SPT=64354 DPT=23 ..."
 # ".*?" saute tous les champs intermédiaires, jusqu'au prochain élément cherché.
+# Seuls TCP et UDP ont des ports : les paquets ICMP/IGMP (ex : ceux de la box) sont ignorés.
 MOTIF_SCAN = r"\[UFW BLOCK\].*? SRC=(?P<ip>\S+) .*?PROTO=(?:TCP|UDP) SPT=\d+ DPT=(?P<port>\d+)"
+
+
+# ---------------------------------------------------------------------------
+# Analyse d'une ligne de log (le "parseur")
+# ---------------------------------------------------------------------------
+
+def lire_moment(ligne):
+    """Renvoie la date d'une ligne de log sous forme d'objet datetime.
+
+    La date est le 1er mot de la ligne. rsyslog l'écrit au format ISO 8601,
+    ex : "2026-11-20T11:17:28+00:00" (année, jour, heure et fuseau horaire
+    en un seul bloc), que fromisoformat() sait convertir directement.
+    """
+    return datetime.fromisoformat(ligne.split()[0])
+
+
+def analyser_ligne(ligne):
+    """Si la ligne est un échec de connexion, renvoie (ip, utilisateur). Sinon, renvoie None.
+
+    On essaie chaque motif de MOTIFS_ECHEC l'un après l'autre :
+    dès qu'un motif correspond, on renvoie ce qu'il a capturé.
+    """
+    for motif in MOTIFS_ECHEC:
+        resultat = re.search(motif, ligne)
+        if resultat:
+            return resultat.group("ip"), resultat.group("utilisateur")
+    # Aucun motif ne correspond : ce n'est pas un échec (ex : "Accepted publickey").
+    return None
+
 
 def analyser_succes(ligne):
     """Si la ligne est une connexion réussie, renvoie (ip, utilisateur, methode). Sinon, None."""
@@ -93,8 +133,10 @@ def analyser_scan(ligne):
     if resultat:
         return resultat.group("ip"), int(resultat.group("port"))
     return None
+
+
 # ---------------------------------------------------------------------------
-# Règle de détection
+# Règle de détection (analyse ponctuelle)
 # ---------------------------------------------------------------------------
 
 def max_echecs_dans_fenetre(heures):
@@ -127,28 +169,14 @@ def max_echecs_dans_fenetre(heures):
 
 
 # ---------------------------------------------------------------------------
-# Analyse d'une ligne de log (le "parseur")
-# ---------------------------------------------------------------------------
-
-def analyser_ligne(ligne):
-    """Si la ligne est un échec de connexion, renvoie (ip, utilisateur). Sinon, renvoie None.
-
-    On essaie chaque motif de MOTIFS_ECHEC l'un après l'autre :
-    dès qu'un motif correspond, on renvoie ce qu'il a capturé.
-    """
-    for motif in MOTIFS_ECHEC:
-        resultat = re.search(motif, ligne)
-        if resultat:
-            return resultat.group("ip"), resultat.group("utilisateur")
-    # Aucun motif ne correspond : ce n'est pas un échec (ex : "Accepted publickey").
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Programme principal
+# Programme principal (analyse ponctuelle)
 # ---------------------------------------------------------------------------
 
 def main():
+    # Fichier à analyser : passé en argument, sinon les vrais logs de siem.
+    # sys.argv est la liste des mots tapés après "python3" : sys.argv[1] est le 1er argument.
+    fichier_log = sys.argv[1] if len(sys.argv) > 1 else FICHIER_PAR_DEFAUT
+
     # Trois dictionnaires, tous indexés par adresse IP :
     compteur = {}       # IP -> nombre total d'échecs          ex : {"192.168.1.20": 4}
     utilisateurs = {}   # IP -> liste des utilisateurs tentés  ex : {"192.168.1.20": ["admin", "root"]}
@@ -156,7 +184,7 @@ def main():
 
     # --- 1. Lecture et extraction ------------------------------------------
     # Toute l'extraction se fait pendant la lecture, ligne par ligne.
-    with open(FICHIER_LOG, "r", encoding="utf-8") as fichier:
+    with open(fichier_log, "r", encoding="utf-8") as fichier:
         for ligne in fichier:
 
             # On cherche si la ligne correspond à un échec de connexion.
@@ -166,15 +194,7 @@ def main():
 
                 # analyser_ligne() renvoie deux valeurs : on les range dans deux variables.
                 ip, utilisateur = echec
-
-                # Extraction de la date : c'est le 1er mot de la ligne.
-                # rsyslog l'écrit au format ISO 8601, ex : "2026-11-20T11:17:28+00:00"
-                # (année, jour, heure et fuseau horaire en un seul bloc).
-                texte_date = ligne.split()[0]
-
-                # fromisoformat() convertit directement ce format en objet datetime,
-                # fuseau horaire compris : pas besoin de décrire le format à la main.
-                moment = datetime.fromisoformat(texte_date)
+                moment = lire_moment(ligne)
 
                 # Comptage : get() renvoie 0 si l'IP n'a encore jamais été vue.
                 compteur[ip] = compteur.get(ip, 0) + 1

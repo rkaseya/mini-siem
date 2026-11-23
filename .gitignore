@@ -1,6 +1,13 @@
+# macOS
 .DS_Store
-Claude outputs/
-Claude outputs/
-.venv/
-alertes.db
+
+# Python
 __pycache__/
+.venv/
+
+# Bases de données locales (tests)
+*.db
+
+# Fichiers temporaires
+*.save
+Claude outputs/
