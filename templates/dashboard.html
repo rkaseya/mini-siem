@@ -16,6 +16,7 @@
       --bleu: #4c9aff;
       --orange: #f5a524;
       --rouge: #f05252;
+      --violet: #a78bfa;
     }
     * { box-sizing: border-box; }
     body {
@@ -31,13 +32,14 @@
          letter-spacing: .8px; color: var(--discret); }
     .sous-titre { color: var(--discret); font-size: 13px; }
     .grille { display: grid; gap: 16px; }
-    .compteurs { grid-template-columns: repeat(3, 1fr); margin-bottom: 16px; }
+    .compteurs { grid-template-columns: repeat(4, 1fr); margin-bottom: 16px; }
     .milieu { grid-template-columns: 2fr 1fr; margin-bottom: 16px; }
     .carte { background: var(--carte); border: 1px solid var(--bord); border-radius: 10px; padding: 18px 20px; }
     .valeur { font-size: 34px; font-weight: 700; font-variant-numeric: tabular-nums; }
     .bleu { color: var(--bleu); }
     .orange { color: var(--orange); }
     .rouge { color: var(--rouge); }
+    .violet { color: var(--violet); }
     table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
     th { text-align: left; font-size: 12px; font-weight: 600; color: var(--discret);
          padding: 6px 10px; border-bottom: 1px solid var(--bord); }
@@ -47,6 +49,7 @@
     .badge { display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 12px; font-weight: 600; }
     .badge.brute_force { background: rgba(245,165,36,.15); color: var(--orange); }
     .badge.compromission { background: rgba(240,82,82,.18); color: var(--rouge); }
+    .badge.scan_ports { background: rgba(167,139,250,.15); color: var(--violet); }
     tr.compromission td { background: rgba(240,82,82,.07); }
     .vide { color: var(--discret); font-style: italic; padding: 10px 0; }
     @media (max-width: 800px) { .compteurs, .milieu { grid-template-columns: 1fr; } }
@@ -72,6 +75,10 @@
   <div class="carte">
     <h2>🔴 Compromissions</h2>
     <div class="valeur rouge">{{ compteurs["compromission"] or 0 }}</div>
+  </div>
+  <div class="carte">
+    <h2>🔍 Scans de ports</h2>
+    <div class="valeur violet">{{ compteurs["scan_ports"] or 0 }}</div>
   </div>
 </section>
 
@@ -110,15 +117,15 @@
   <h2>Dernières alertes</h2>
   {% if dernieres %}
     <table>
-      <tr><th>Date (UTC)</th><th>Type</th><th>IP</th><th>Utilisateur</th><th>Échecs</th><th>Méthode</th></tr>
+      <tr><th>Date (UTC)</th><th>Type</th><th>IP</th><th>Utilisateur</th><th>Échecs / ports</th><th>Méthode</th></tr>
       {% for alerte in dernieres %}
         <tr class="{{ alerte['type'] }}">
           <td class="mono">{{ alerte["moment"][:19] | replace("T", " ") }}</td>
-          <td><span class="badge {{ alerte['type'] }}">{{ alerte["type"] | replace("_", " ") }}</span></td>
+          <td><span class="badge {{ alerte['type'] }}">{{ "scan de ports" if alerte["type"] == "scan_ports" else alerte["type"] | replace("_", " ") }}</span></td>
           <td class="mono">{{ alerte["ip"] }}</td>
           {# Le nom d'utilisateur vient des logs, donc potentiellement d'un attaquant :
              Jinja l'échappe automatiquement. Ne JAMAIS ajouter le filtre "| safe" ici. #}
-          <td class="mono">{{ alerte["utilisateur"] }}</td>
+          <td class="mono">{{ alerte["utilisateur"] or "—" }}</td>
           <td>{{ alerte["nb_echecs"] }}</td>
           <td>{{ alerte["methode"] or "—" }}</td>
         </tr>

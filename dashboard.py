@@ -43,7 +43,7 @@ def accueil():
     """Page principale du tableau de bord."""
 
     # Valeurs par défaut : la page s'affiche même tant que les requêtes ne sont pas écrites
-    compteurs = {"total": 0, "brute_force": 0, "compromission": 0}
+    compteurs = {"total": 0, "brute_force": 0, "compromission": 0, "scan_ports": 0}
     top_ip = []
     dernieres = []
     par_jour = []
@@ -51,7 +51,8 @@ def accueil():
     compteurs = requete("""
         SELECT COUNT(*)                    AS total,
                SUM(type = 'brute_force')   AS brute_force,
-               SUM(type = 'compromission') AS compromission
+               SUM(type = 'compromission') AS compromission,
+               SUM(type = 'scan_ports')    AS scan_ports
         FROM alertes
     """)[0]
 
@@ -76,7 +77,7 @@ def accueil():
         GROUP BY jour
         ORDER BY jour
     """)
-    
+
     return render_template(
         "dashboard.html",
         compteurs=compteurs,

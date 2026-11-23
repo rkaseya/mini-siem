@@ -1,6 +1,6 @@
 # 🛡️ mini-SIEM : détection d'attaques par force brute SSH
 
-Projet personnel de cybersécurité : un **mini-SIEM** écrit en Python, qui analyse **en temps réel** des logs SSH centralisés et détecte les attaques par force brute, ainsi que les **compromissions** (brute force suivi d'une connexion réussie). Les alertes sont envoyées sur téléphone, stockées dans SQLite et consultables dans un **tableau de bord web**.
+Projet personnel de cybersécurité : un **mini-SIEM** écrit en Python, qui analyse **en temps réel** des logs SSH centralisés et détecte les attaques par force brute, les **compromissions** (brute force suivi d'une connexion réussie) et les **scans de ports**. Les alertes sont envoyées sur téléphone, stockées dans SQLite et consultables dans un **tableau de bord web**.
 
 ![Tableau de bord du mini-SIEM](docs/dashboard.png) Il tourne dans un **home lab** monté de zéro, où je joue à la fois l'attaquant (Kali Linux) et le défenseur (collecte et analyse des logs).
 
@@ -38,7 +38,12 @@ flowchart LR
 - Pare-feu `ufw` : seul SSH est exposé (vérifié par un scan `nmap` depuis Kali)
 
 ### Collecte des logs
-`ubuntu-01` transfère ses logs d'authentification (`auth,authpriv.*`) vers `siem` avec **rsyslog** en TCP. La file d'attente garde les logs si le collecteur est indisponible. Côté `siem`, les logs sont rangés par machine et par programme :
+`ubuntu-01` transfère deux sources de logs vers `siem` avec **rsyslog** en TCP :
+
+- les logs d'**authentification** (`auth,authpriv.*`) : SSH, `sudo`… ;
+- les logs du **noyau** (`kern.*`), dont les paquets bloqués par le pare-feu (`ufw logging low`).
+
+ La file d'attente garde les logs si le collecteur est indisponible. Côté `siem`, les logs sont rangés par machine et par programme :
 
 ```
 /var/log/remote/<machine>/<programme>.log
@@ -74,12 +79,13 @@ Les fichiers sont créés en `0640` et les dossiers en `0750`, avec le groupe `a
 
 ### Événements détectés
 
-| Événement OpenSSH | Exemple |
+| Événement | Exemple |
 |---|---|
 | Mot de passe refusé | `Failed password for remikaseya from 192.168.1.14 port 49376 ssh2` |
 | Utilisateur inexistant | `Invalid user admin from 192.168.1.29 port 36864` |
 | Utilisateur **existant** non authentifié | `Connection closed by authenticating user root 192.168.1.29 port 51234 [preauth]` |
 | Connexion **réussie** | `Accepted publickey for remikaseya from 192.168.1.14 port 49400 ssh2` |
+| Paquet **bloqué par le pare-feu** | `kernel: [UFW BLOCK] IN=ens18 ... SRC=192.168.1.29 DST=192.168.1.28 ... PROTO=TCP SPT=64354 DPT=23 ...` |
 
 Le troisième cas est un **angle mort** découvert pendant les tests. Comme les mots de passe sont désactivés, une attaque sur un compte qui existe (`root`) ne produit ni `Invalid user` ni `Failed password` : elle passait inaperçue. C'est pourtant l'attaque la plus dangereuse.
 
@@ -120,6 +126,18 @@ La **méthode** d'authentification fait partie de l'alerte, car elle oriente l'e
 
 La règle utilise le même seuil que le brute force : une simple faute de frappe avant une connexion légitime ne déclenche pas d'alerte critique.
 
+### Détection de scan de ports
+
+Avant d'attaquer, un attaquant cherche les services ouverts en testant de nombreux ports (`nmap`). Sur `ubuntu-01`, le pare-feu bloque tout sauf SSH et journalise chaque paquet bloqué.
+
+`surveillance.py` suit en parallèle `sshd-session.log` et `kernel.log`. Pour chaque paquet bloqué, il garde le couple (heure, port) dans une fenêtre glissante, puis calcule l'**ensemble des ports différents** visés par l'IP (`set` Python : sans doublons). S'il atteint `SEUIL_PORTS`, une alerte 🔍 est levée.
+
+```
+🔍 [2026-11-23 21:30:12] SCAN DE PORTS : 192.168.1.29 a tenté 3 ports différents en moins de 60 s (23, 256, 8080)
+```
+
+**Le seuil est adapté à la source de logs.** Pour éviter qu'un attaquant ne sature le disque, `ufw` limite ses messages (une rafale d'une dizaine, puis environ 3 par minute). Mesure dans le lab : un scan `nmap` de 1 000 ports ne laisse que **2 à 3 lignes** dès que la réserve est entamée. Un seuil de 5 ports ne déclenchait donc presque jamais ; il a été abaissé à **3 ports différents en 60 secondes**, ce qui reste rare pour une machine légitime. Les paquets sans port (ICMP, IGMP de la box) sont ignorés par le parseur.
+
 ### Notifications sur téléphone
 
 Chaque alerte est aussi envoyée sur le téléphone via [ntfy](https://ntfy.sh), un service de notifications open source : une simple requête HTTPS suffit, sans bibliothèque externe (`urllib` de la bibliothèque standard).
@@ -128,6 +146,7 @@ Chaque alerte est aussi envoyée sur le téléphone via [ntfy](https://ntfy.sh),
 |---|---|---|
 | 🚨 Brute force | `high` | Notification visible et sonore |
 | 🔴 Compromission | `urgent` | Notification insistante |
+| 🔍 Scan de ports | `high` | Notification visible et sonore |
 
 Choix de conception :
 - **Le secret reste hors du code** : le sujet ntfy fonctionne comme un mot de passe (quiconque le connaît peut lire ou envoyer des alertes). Il est lu dans la variable d'environnement `NTFY_TOPIC`, définie dans le service `systemd`, et n'apparaît jamais dans le dépôt.
@@ -145,7 +164,7 @@ Chaque alerte est enregistrée dans une base **SQLite** (`/var/lib/mini-siem/ale
 
 `dashboard.py` lit la base et affiche, avec un rechargement automatique toutes les 30 s :
 
-- les **compteurs** (total, brute force, compromissions) ;
+- les **compteurs** (total, brute force, compromissions, scans de ports) ;
 - le **top 5 des IP** les plus actives ;
 - les **20 dernières alertes**, compromissions surlignées en rouge ;
 - un **graphique** du nombre d'alertes par jour.
@@ -156,7 +175,8 @@ Les quatre requêtes SQL d'analyse :
 -- Compteurs
 SELECT COUNT(*) AS total,
        SUM(type = 'brute_force')   AS brute_force,
-       SUM(type = 'compromission') AS compromission
+       SUM(type = 'compromission') AS compromission,
+       SUM(type = 'scan_ports')    AS scan_ports
 FROM alertes;
 
 -- Top 5 des IP
@@ -194,6 +214,7 @@ Le générateur de données de test contient volontairement une alerte « piég�
 | [T1110.001 – Password Guessing](https://attack.mitre.org/techniques/T1110/001/) | Essais de mots de passe sur des comptes |
 | [T1110.003 – Password Spraying](https://attack.mitre.org/techniques/T1110/003/) | Un même essai sur plusieurs comptes (`admin`, `root`, `test`…) |
 | [T1078 – Valid Accounts](https://attack.mitre.org/techniques/T1078/) | Connexion avec un compte légitime après un brute force (alerte critique 🔴) |
+| [T1046 – Network Service Discovery](https://attack.mitre.org/techniques/T1046/) | Scan de ports pour découvrir les services exposés (alerte 🔍) |
 
 ---
 
@@ -304,6 +325,12 @@ Puis ouvrir `http://192.168.1.201:5000`.
 for u in admin root test oracle guest; do ssh -o BatchMode=yes $u@<IP_CIBLE>; done
 ```
 
+### Reproduire un scan de ports (depuis Kali)
+```bash
+sudo nmap -sS <IP_CIBLE>
+```
+Prérequis sur la cible : `sudo ufw logging low` et le transfert de `kern.*` vers `siem`.
+
 ### Simuler une compromission
 Depuis une machine qui possède une clé autorisée sur la cible : quelques échecs, puis une connexion réussie depuis la même IP.
 ```bash
@@ -328,6 +355,8 @@ Résultat attendu dans `journalctl -u mini-siem -f` : une alerte 🚨 puis une a
 - **Liste des utilisateurs** : elle couvre tout l'historique de l'IP, pas uniquement la rafale qui a déclenché l'alerte.
 - **Performance** : dans l'analyse ponctuelle, l'algorithme de fenêtre est en O(n²). C'est suffisant pour un lab ; la surveillance en temps réel, elle, utilise une fenêtre glissante bien plus légère.
 - **Format de log** : le parseur attend des dates ISO 8601, telles qu'écrites par rsyslog.
+- **Visibilité limitée des scans** : la limitation des messages de `ufw` masque la majorité des ports testés. Un scan **lent** (un port toutes les 20 secondes) resterait sous le seuil ; les paquets de routine de la box consomment aussi une partie de la réserve de messages.
+- **Une seule cible surveillée** : les fichiers suivis sont ceux de `ubuntu-01` ; ajouter une machine demande d'ajouter ses fichiers à la liste.
 - **Tableau de bord sans authentification** : toute machine du réseau local peut le consulter. Acceptable dans un lab, mais il faudrait ajouter une authentification en production.
 - **Tableau de bord en HTTP** : le trafic n'est pas chiffré. En production, il faudrait le placer derrière un reverse proxy en HTTPS (nginx, Caddy).
 - **Dépendance externe** : la bibliothèque de graphiques (Chart.js) est chargée depuis un CDN. Le navigateur doit avoir accès à Internet, et on fait confiance à ce serveur tiers (risque de chaîne d'approvisionnement) ; l'héberger localement supprimerait ce risque.
@@ -345,7 +374,8 @@ Résultat attendu dans `journalctl -u mini-siem -f` : une alerte 🚨 puis une a
 - [x] Notifications sur téléphone (ntfy)
 - [x] Stockage des alertes (SQLite)
 - [x] Tableau de bord web (Flask + Gunicorn)
-- [ ] Nouvelles règles : échecs `sudo`, création d'utilisateur, scan de ports (logs `ufw`)
+- [x] Détection de **scan de ports** (logs `ufw`)
+- [ ] Nouvelles règles : échecs `sudo`, création d'utilisateur
 - [ ] Authentification et HTTPS pour le tableau de bord
 
 ---
@@ -354,4 +384,4 @@ Résultat attendu dans `journalctl -u mini-siem -f` : une alerte 🚨 puis une a
 
 - **Systèmes & réseau** : Proxmox VE, Linux (Ubuntu, Kali), SSH, `systemd`, droits Unix, adressage IP, DHCP, VPN (Tailscale)
 - **Sécurité** : durcissement SSH, pare-feu `ufw`, reconnaissance `nmap`, centralisation de logs, ingénierie de détection, faux positifs, moindre privilège, gestion des secrets, injection SQL, XSS, durcissement `systemd`, MITRE ATT&CK
-- **Développement** : Python (expressions régulières, `datetime`, structures de données, générateurs, modules, requêtes HTTP, gestion d'erreurs), SQL / SQLite, Flask, Jinja, Gunicorn, HTML / CSS, variables d'environnement, Git / GitHub
+- **Développement** : Python (expressions régulières, `datetime`, structures de données, ensembles, générateurs, modules, requêtes HTTP, gestion d'erreurs), SQL / SQLite, Flask, Jinja, Gunicorn, HTML / CSS, variables d'environnement, Git / GitHub
