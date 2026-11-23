@@ -1,6 +1,8 @@
 # 🛡️ mini-SIEM : détection d'attaques par force brute SSH
 
-Projet personnel de cybersécurité : un **mini-SIEM** écrit en Python, qui analyse **en temps réel** des logs SSH centralisés et détecte les attaques par force brute, ainsi que les **compromissions** (brute force suivi d'une connexion réussie). Il tourne dans un **home lab** monté de zéro, où je joue à la fois l'attaquant (Kali Linux) et le défenseur (collecte et analyse des logs).
+Projet personnel de cybersécurité : un **mini-SIEM** écrit en Python, qui analyse **en temps réel** des logs SSH centralisés et détecte les attaques par force brute, ainsi que les **compromissions** (brute force suivi d'une connexion réussie). Les alertes sont envoyées sur téléphone, stockées dans SQLite et consultables dans un **tableau de bord web**.
+
+![Tableau de bord du mini-SIEM](docs/dashboard.png) Il tourne dans un **home lab** monté de zéro, où je joue à la fois l'attaquant (Kali Linux) et le défenseur (collecte et analyse des logs).
 
 > Objectif : comprendre de l'intérieur comment fonctionne un SIEM : collecte, parsing, règles de détection, gestion des faux positifs.
 
@@ -23,6 +25,9 @@ flowchart LR
     S --> D[surveillance.py<br/>service systemd]
     D --> A[🚨 alertes<br/>journal système]
     D -- HTTPS --> N[📱 téléphone<br/>notifications ntfy]
+    D -- écrit --> DB[(alertes.db<br/>SQLite)]
+    DB -- lecture seule --> W[dashboard.py<br/>Flask + Gunicorn]
+    W -- HTTP :5000<br/>réseau local --> B[🖥️ navigateur]
 ```
 
 **Accès distant** : Tailscale, avec Proxmox en *subnet router*. Aucun port n'est ouvert sur la box Internet.
@@ -50,6 +55,11 @@ Les fichiers sont créés en `0640` et les dossiers en `0750`, avec le groupe `a
 | `detect_bruteforce.py` | Parseur, règle de détection et **analyse ponctuelle** d'un fichier de logs |
 | `surveillance.py` | **Surveillance en temps réel** : suit le fichier, alerte au fil de l'eau (brute force 🚨 et compromission 🔴) et envoie des notifications |
 | `mini-siem.service` | Unité `systemd` pour faire tourner la surveillance en permanence sur `siem` (sujet ntfy à personnaliser) |
+| `dashboard.py` | **Tableau de bord web** (Flask) : compteurs, top des IP, dernières alertes, graphique |
+| `templates/dashboard.html` | Page HTML du tableau de bord (graphique Chart.js) |
+| `mini-siem-dashboard.service` | Unité `systemd` du tableau de bord (Gunicorn, compte dédié en lecture seule) |
+| `outils/generer_alertes_test.py` | Génère une base d'alertes **fictives** pour développer le tableau de bord en local |
+| `docs/dashboard.png` | Capture d'écran du tableau de bord |
 | `sshd-session.log` | Logs d'exemple pour tester en local |
 
 ---
@@ -123,6 +133,58 @@ Choix de conception :
 - **Le secret reste hors du code** : le sujet ntfy fonctionne comme un mot de passe (quiconque le connaît peut lire ou envoyer des alertes). Il est lu dans la variable d'environnement `NTFY_TOPIC`, définie dans le service `systemd`, et n'apparaît jamais dans le dépôt.
 - **La surveillance ne dépend pas des notifications** : en cas de panne réseau ou d'indisponibilité de ntfy, l'erreur est journalisée et la détection continue.
 - **Pas d'échec silencieux** : au démarrage, le service indique si les notifications sont actives (`📱 Notifications ntfy activées`) ou non (`⚠️ NTFY_TOPIC non défini`). Un SIEM qui n'envoie pas ses alertes sans le signaler donnerait une fausse impression de sécurité.
+
+### Stockage des alertes
+
+Chaque alerte est enregistrée dans une base **SQLite** (`/var/lib/mini-siem/alertes.db`) : date, type, IP, utilisateur, nombre d'échecs, méthode et message.
+
+- **Requêtes paramétrées** (`?`) : l'IP et le nom d'utilisateur viennent des logs, donc potentiellement d'un attaquant. Ils sont toujours transmis comme des données, jamais insérés dans le texte SQL : pas d'**injection SQL** possible.
+- **Seul dossier accessible en écriture** : `StateDirectory=mini-siem` dans le service `systemd`. Le reste du système reste en lecture seule (`ProtectSystem=strict`).
+
+### Tableau de bord web
+
+`dashboard.py` lit la base et affiche, avec un rechargement automatique toutes les 30 s :
+
+- les **compteurs** (total, brute force, compromissions) ;
+- le **top 5 des IP** les plus actives ;
+- les **20 dernières alertes**, compromissions surlignées en rouge ;
+- un **graphique** du nombre d'alertes par jour.
+
+Les quatre requêtes SQL d'analyse :
+
+```sql
+-- Compteurs
+SELECT COUNT(*) AS total,
+       SUM(type = 'brute_force')   AS brute_force,
+       SUM(type = 'compromission') AS compromission
+FROM alertes;
+
+-- Top 5 des IP
+SELECT ip, COUNT(*) AS nb, MAX(moment) AS derniere
+FROM alertes GROUP BY ip ORDER BY nb DESC LIMIT 5;
+
+-- 20 dernières alertes
+SELECT moment, type, ip, utilisateur, nb_echecs, methode
+FROM alertes ORDER BY moment DESC LIMIT 20;
+
+-- Alertes par jour
+SELECT substr(moment, 1, 10) AS jour, COUNT(*) AS nb
+FROM alertes GROUP BY jour ORDER BY jour;
+```
+
+#### Sécurité du tableau de bord
+
+| Mesure | Pourquoi |
+|---|---|
+| Base ouverte en **lecture seule** (`mode=ro`) | Même en cas de bug ou de faille, le tableau de bord ne peut ni modifier ni effacer une alerte |
+| **Compte dédié** `minisiem-web`, sans groupe | Distinct du compte qui écrit les alertes : le service exposé au réseau a le minimum de droits |
+| **Gunicorn** au lieu du serveur de développement Flask | Serveur prévu pour la production ; le mode debug de Flask (exécution de code à distance) n'est jamais activé |
+| Port 5000 ouvert **uniquement au réseau local** (`ufw`) | Le tableau de bord n'est pas joignable depuis Internet |
+| **Échappement automatique** (Jinja) | Les noms d'utilisateur viennent d'un attaquant : du code glissé dans les logs n'est jamais exécuté dans le navigateur de l'analyste (**XSS**) |
+| **Journal des accès** (`--access-logfile`) | Chaque consultation du tableau de bord est tracée |
+| Code dans `/opt/mini-siem`, **modifiable par root uniquement** | Un service compromis ne peut pas réécrire son propre code |
+
+Le générateur de données de test contient volontairement une alerte « piégée » (`<script>alert('XSS')</script>` comme nom d'utilisateur) : elle s'affiche comme du texte, sans être exécutée.
 
 ### Correspondance MITRE ATT&CK
 
@@ -202,6 +264,33 @@ Choix de sécurité :
    ```
 4. Vérifier : `sudo journalctl -u mini-siem -n 5` doit afficher `📱 Notifications ntfy activées`.
 
+### Tableau de bord : développement en local
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install flask
+python3 outils/generer_alertes_test.py    # base d'alertes fictives
+python3 dashboard.py                      # http://127.0.0.1:5000
+```
+
+### Tableau de bord : déploiement sur `siem`
+```bash
+sudo apt install python3-flask gunicorn -y
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin minisiem-web
+
+sudo cp dashboard.py /opt/mini-siem/
+sudo cp -r templates /opt/mini-siem/
+sudo chown -R root:root /opt/mini-siem
+sudo chmod -R u=rwX,go=rX /opt/mini-siem      # lisible par tous, modifiable par root seulement
+
+sudo cp mini-siem-dashboard.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now mini-siem-dashboard
+
+sudo ufw allow from 192.168.1.0/24 to any port 5000 proto tcp
+```
+Puis ouvrir `http://192.168.1.201:5000`.
+
 ### Exemple de sortie (analyse ponctuelle)
 ```
 ℹ️  192.168.1.14 - 1 échec(s) - utilisateurs : remikaseya
@@ -239,6 +328,9 @@ Résultat attendu dans `journalctl -u mini-siem -f` : une alerte 🚨 puis une a
 - **Liste des utilisateurs** : elle couvre tout l'historique de l'IP, pas uniquement la rafale qui a déclenché l'alerte.
 - **Performance** : dans l'analyse ponctuelle, l'algorithme de fenêtre est en O(n²). C'est suffisant pour un lab ; la surveillance en temps réel, elle, utilise une fenêtre glissante bien plus légère.
 - **Format de log** : le parseur attend des dates ISO 8601, telles qu'écrites par rsyslog.
+- **Tableau de bord sans authentification** : toute machine du réseau local peut le consulter. Acceptable dans un lab, mais il faudrait ajouter une authentification en production.
+- **Tableau de bord en HTTP** : le trafic n'est pas chiffré. En production, il faudrait le placer derrière un reverse proxy en HTTPS (nginx, Caddy).
+- **Dépendance externe** : la bibliothèque de graphiques (Chart.js) est chargée depuis un CDN. Le navigateur doit avoir accès à Internet, et on fait confiance à ce serveur tiers (risque de chaîne d'approvisionnement) ; l'héberger localement supprimerait ce risque.
 
 ---
 
@@ -250,15 +342,16 @@ Résultat attendu dans `journalctl -u mini-siem -f` : une alerte 🚨 puis une a
 - [x] Détection des attaques sur des comptes existants
 - [x] Détection d'une **intrusion réussie** (échecs puis `Accepted`)
 - [x] Surveillance **en temps réel** + service `systemd` durci
-- [ ] Nouvelles règles : échecs `sudo`, création d'utilisateur, scan de ports (logs `ufw`)
 - [x] Notifications sur téléphone (ntfy)
-- [ ] Stockage des alertes (JSON / SQLite)
-- [ ] Tableau de bord
+- [x] Stockage des alertes (SQLite)
+- [x] Tableau de bord web (Flask + Gunicorn)
+- [ ] Nouvelles règles : échecs `sudo`, création d'utilisateur, scan de ports (logs `ufw`)
+- [ ] Authentification et HTTPS pour le tableau de bord
 
 ---
 
 ## 🧠 Compétences mobilisées
 
 - **Systèmes & réseau** : Proxmox VE, Linux (Ubuntu, Kali), SSH, `systemd`, droits Unix, adressage IP, DHCP, VPN (Tailscale)
-- **Sécurité** : durcissement SSH, pare-feu `ufw`, reconnaissance `nmap`, centralisation de logs, ingénierie de détection, faux positifs, moindre privilège, gestion des secrets, MITRE ATT&CK
-- **Développement** : Python (expressions régulières, `datetime`, structures de données, générateurs, modules, requêtes HTTP, gestion d'erreurs), variables d'environnement, Git / GitHub
+- **Sécurité** : durcissement SSH, pare-feu `ufw`, reconnaissance `nmap`, centralisation de logs, ingénierie de détection, faux positifs, moindre privilège, gestion des secrets, injection SQL, XSS, durcissement `systemd`, MITRE ATT&CK
+- **Développement** : Python (expressions régulières, `datetime`, structures de données, générateurs, modules, requêtes HTTP, gestion d'erreurs), SQL / SQLite, Flask, Jinja, Gunicorn, HTML / CSS, variables d'environnement, Git / GitHub
