@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="30"> <!-- rechargement automatique toutes les 30 s -->
+  <title>mini-SIEM · Tableau de bord</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <style>
+    :root {
+      --fond: #0f1419;
+      --carte: #171d24;
+      --bord: #263040;
+      --texte: #d7dde5;
+      --discret: #8592a3;
+      --bleu: #4c9aff;
+      --orange: #f5a524;
+      --rouge: #f05252;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 28px;
+      background: var(--fond);
+      color: var(--texte);
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 24px; }
+    h1 { margin: 0; font-size: 22px; letter-spacing: .3px; }
+    h2 { margin: 0 0 14px; font-size: 13px; font-weight: 600; text-transform: uppercase;
+         letter-spacing: .8px; color: var(--discret); }
+    .sous-titre { color: var(--discret); font-size: 13px; }
+    .grille { display: grid; gap: 16px; }
+    .compteurs { grid-template-columns: repeat(3, 1fr); margin-bottom: 16px; }
+    .milieu { grid-template-columns: 2fr 1fr; margin-bottom: 16px; }
+    .carte { background: var(--carte); border: 1px solid var(--bord); border-radius: 10px; padding: 18px 20px; }
+    .valeur { font-size: 34px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .bleu { color: var(--bleu); }
+    .orange { color: var(--orange); }
+    .rouge { color: var(--rouge); }
+    table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+    th { text-align: left; font-size: 12px; font-weight: 600; color: var(--discret);
+         padding: 6px 10px; border-bottom: 1px solid var(--bord); }
+    td { padding: 7px 10px; border-bottom: 1px solid #1e2631; }
+    tr:last-child td { border-bottom: none; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+    .badge { display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 12px; font-weight: 600; }
+    .badge.brute_force { background: rgba(245,165,36,.15); color: var(--orange); }
+    .badge.compromission { background: rgba(240,82,82,.18); color: var(--rouge); }
+    tr.compromission td { background: rgba(240,82,82,.07); }
+    .vide { color: var(--discret); font-style: italic; padding: 10px 0; }
+    @media (max-width: 800px) { .compteurs, .milieu { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>🛡️ mini-SIEM</h1>
+  <span class="sous-titre">Tableau de bord · actualisé toutes les 30 s</span>
+</header>
+
+<!-- Compteurs -->
+<section class="grille compteurs">
+  <div class="carte">
+    <h2>Alertes au total</h2>
+    <div class="valeur bleu">{{ compteurs["total"] or 0 }}</div>
+  </div>
+  <div class="carte">
+    <h2>🚨 Brute force</h2>
+    <div class="valeur orange">{{ compteurs["brute_force"] or 0 }}</div>
+  </div>
+  <div class="carte">
+    <h2>🔴 Compromissions</h2>
+    <div class="valeur rouge">{{ compteurs["compromission"] or 0 }}</div>
+  </div>
+</section>
+
+<!-- Graphique + top IP -->
+<section class="grille milieu">
+  <div class="carte">
+    <h2>Alertes par jour</h2>
+    {% if par_jour %}
+      <canvas id="graphique" height="110"></canvas>
+    {% else %}
+      <p class="vide">Pas encore de données (requête SQL 4).</p>
+    {% endif %}
+  </div>
+
+  <div class="carte">
+    <h2>Top 5 des IP</h2>
+    {% if top_ip %}
+      <table>
+        <tr><th>IP</th><th>Alertes</th><th>Dernière</th></tr>
+        {% for ligne in top_ip %}
+          <tr>
+            <td class="mono">{{ ligne["ip"] }}</td>
+            <td>{{ ligne["nb"] }}</td>
+            <td class="mono">{{ ligne["derniere"][:16] | replace("T", " ") }}</td>
+          </tr>
+        {% endfor %}
+      </table>
+    {% else %}
+      <p class="vide">Pas encore de données (requête SQL 2).</p>
+    {% endif %}
+  </div>
+</section>
+
+<!-- Dernières alertes -->
+<section class="carte">
+  <h2>Dernières alertes</h2>
+  {% if dernieres %}
+    <table>
+      <tr><th>Date (UTC)</th><th>Type</th><th>IP</th><th>Utilisateur</th><th>Échecs</th><th>Méthode</th></tr>
+      {% for alerte in dernieres %}
+        <tr class="{{ alerte['type'] }}">
+          <td class="mono">{{ alerte["moment"][:19] | replace("T", " ") }}</td>
+          <td><span class="badge {{ alerte['type'] }}">{{ alerte["type"] | replace("_", " ") }}</span></td>
+          <td class="mono">{{ alerte["ip"] }}</td>
+          {# Le nom d'utilisateur vient des logs, donc potentiellement d'un attaquant :
+             Jinja l'échappe automatiquement. Ne JAMAIS ajouter le filtre "| safe" ici. #}
+          <td class="mono">{{ alerte["utilisateur"] }}</td>
+          <td>{{ alerte["nb_echecs"] }}</td>
+          <td>{{ alerte["methode"] or "—" }}</td>
+        </tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p class="vide">Pas encore de données (requête SQL 3).</p>
+  {% endif %}
+</section>
+
+{% if par_jour %}
+<script>
+  // Les données arrivent de Python via le filtre tojson, qui les encode sans risque pour JavaScript
+  const jours = {{ par_jour | map(attribute="jour") | list | tojson }};
+  const valeurs = {{ par_jour | map(attribute="nb") | list | tojson }};
+
+  new Chart(document.getElementById("graphique"), {
+    type: "bar",
+    data: { labels: jours, datasets: [{ label: "Alertes", data: valeurs, backgroundColor: "#4c9aff", borderRadius: 4 }] },
+    options: {
+      animation: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: "#8592a3" }, grid: { display: false } },
+        y: { beginAtZero: true, ticks: { color: "#8592a3", precision: 0 }, grid: { color: "#1e2631" } }
+      }
+    }
+  });
+</script>
+{% endif %}
+
+</body>
+</html>

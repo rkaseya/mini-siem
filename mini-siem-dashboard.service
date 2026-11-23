@@ -1,0 +1,26 @@
+[Unit]
+Description=Mini-SIEM - tableau de bord web
+After=network.target mini-siem.service
+
+[Service]
+Type=simple
+# Compte dédié, distinct de celui qui écrit les alertes : il peut seulement lire la base
+User=minisiem-web
+WorkingDirectory=/opt/mini-siem
+Environment=MINI_SIEM_DB=/var/lib/mini-siem/alertes.db
+# Gunicorn : serveur web de production (remplace le serveur de développement de Flask)
+# --access-logfile - : chaque visite est écrite dans le journal (qui a consulté le tableau de bord ?)
+# --no-control-socket : désactive le socket de contrôle de Gunicorn 25, inutile ici
+#                       et impossible à créer avec ProtectSystem=strict
+ExecStart=/usr/bin/gunicorn --bind 0.0.0.0:5000 --workers 2 --access-logfile - --no-control-socket dashboard:app
+Restart=on-failure
+RestartSec=5
+
+# Durcissement : système en lecture seule, y compris la base des alertes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
