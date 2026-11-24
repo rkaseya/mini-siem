@@ -8,6 +8,8 @@ Il tourne dans un **home lab** monté de zéro, où je joue à la fois l'attaqua
 
 > Objectif : comprendre de l'intérieur comment fonctionne un SIEM : collecte, parsing, règles de détection, gestion des faux positifs, puis réponse automatique (logique SOAR).
 
+Projet réalisé avec une IA (Claude) comme mentor et relecteur : la répartition précise du travail est détaillée dans [Méthode de travail et apport de l'IA](#-méthode-de-travail-et-apport-de-lia), et les choix d'architecture sont justifiés dans [Choix de conception et compromis](#-choix-de-conception-et-compromis).
+
 ---
 
 ## 🏗️ Architecture du lab
@@ -260,6 +262,52 @@ Le générateur de données de test contient volontairement une alerte « piég�
 
 ---
 
+## 🧭 Choix de conception et compromis
+
+Chaque choix ci-dessous a une alternative crédible. Le tableau indique pourquoi elle a été écartée et ce que le choix retenu coûte.
+
+### Architecture
+
+| Choix retenu | Alternative | Pourquoi | Ce que ça coûte |
+|---|---|---|---|
+| **Détection centralisée** sur un serveur dédié (`siem`) | Un agent sur chaque machine (comme fail2ban) | Vue d'ensemble et corrélation entre sources ; la cible n'exécute rien de lourd ; les logs sont déjà hors de la cible si elle est compromise (un attaquant ne peut plus effacer ses traces) | `siem` devient un point unique de défaillance ; la réponse a besoin d'un canal vers la cible |
+| **rsyslog en TCP** avec file d'attente | UDP (le défaut historique de syslog) | Pas de perte silencieuse de logs ; la file garde les messages si `siem` est indisponible | Les logs circulent **en clair** sur le réseau local (rsyslog sait faire du TLS, non mis en place) |
+| **Python sans dépendance externe** pour la surveillance (bibliothèque standard uniquement) | Bibliothèques spécialisées (parsing, notifications, ORM) | Déploiement trivial, aucune chaîne d'approvisionnement à surveiller sur le composant critique | Plus de code écrit à la main (requête HTTP, lecture continue des fichiers) |
+| **Configuration dans le code** (constantes) + secrets en **variables d'environnement** | Un fichier de configuration (YAML, INI) | Simplicité pour un lab à une cible ; les secrets restent hors du dépôt | Ajouter une machine demande de modifier le code |
+
+### Détection
+
+| Choix retenu | Alternative | Pourquoi | Ce que ça coûte |
+|---|---|---|---|
+| **Expressions régulières** sur les lignes de log | Logs structurés (JSON via rsyslog, journald) | Lisible, rapide à écrire et à tester sur de vraies lignes | Fragile aux changements de format : vécu deux fois (passage aux dates ISO 8601, `sshd` devenu `sshd-session` avec OpenSSH 10) |
+| **Fenêtre glissante en mémoire** : on ne garde que les événements des 60 dernières secondes | Stocker tous les événements et interroger une base | Mémoire et calcul proportionnels aux seuls événements récents ; mesuré : environ 6 s de CPU et 12 Mo de RAM en 24 h | L'état est perdu au redémarrage du service |
+| Analyse ponctuelle en **O(n²)** (double boucle) | Tri + deux pointeurs, en O(n log n) | Algorithme simple à écrire, à relire et à expliquer ; volumes faibles dans le lab | Ne passerait pas à l'échelle sur des millions de lignes |
+| Lecture des fichiers **toutes les secondes** (polling) | Notifications du noyau (inotify) | Simple, portable, sans dépendance | Jusqu'à 1 s de délai ; le service se réveille chaque seconde (coût négligeable, mesuré) |
+| Seuils : **3 échecs en 60 s**, **3 ports différents en 60 s** | Des seuils plus élevés (moins d'alertes) | Le seuil des scans a été **abaissé de 5 à 3 après mesure** : `ufw` ne journalise que 2 à 3 lignes par scan une fois sa réserve entamée | Plus de risque de faux positifs ; un scan lent passe sous le seuil |
+| **Une alerte par IP et par fenêtre** (anti-répétition) | Une alerte par événement | Évite la « fatigue d'alerte » : 100 tentatives donnent 1 alerte par minute, pas 98 | L'intensité exacte de l'attaque n'apparaît pas dans les notifications |
+
+### Stockage et visualisation
+
+| Choix retenu | Alternative | Pourquoi | Ce que ça coûte |
+|---|---|---|---|
+| **SQLite** | Elasticsearch, PostgreSQL | Un seul fichier, aucun serveur à maintenir, SQL standard ; adapté à quelques milliers d'alertes | Pas de recherche plein texte, pas fait pour de gros volumes ni plusieurs écrivains concurrents |
+| **Tableau de bord sur mesure** (Flask + Gunicorn) | Grafana, Kibana | Apprendre le SQL d'analyse et la sécurité web (XSS, lecture seule) | Moins de fonctionnalités ; ni authentification ni HTTPS |
+| **Deux comptes de service** séparés : l'un écrit les alertes, l'autre les lit (base en `mode=ro`) | Un seul compte pour tout | Le composant exposé au réseau (le tableau de bord) ne peut rien modifier | Un compte et un service de plus à gérer |
+| **ntfy public** pour les notifications | Serveur ntfy auto-hébergé, e-mail | Aucune infrastructure à ajouter, notifications par priorité | Les alertes (IP internes, noms d'utilisateur) transitent par un serveur tiers |
+
+### Réponse automatique
+
+| Choix retenu | Alternative | Pourquoi | Ce que ça coûte |
+|---|---|---|---|
+| Ordre envoyé par **SSH avec commande forcée** vers un script unique | Un agent qui écoute sur la cible, une API | Pas de nouveau service exposé sur la cible ; réutilise SSH, déjà durci ; la clé ne peut rien faire d'autre | Une clé sans phrase de passe sur `siem` (nécessaire pour un service automatique), d'où les autres barrières |
+| **Double validation** : `siem` décide, la cible **revalide** tout | Faire confiance à l'ordre reçu | Si `siem` est compromis, l'attaquant ne peut pas abuser du script (liste blanche, durée bornée, format strict) | Logique de configuration dupliquée sur deux machines |
+| **Blocages temporaires** (1 h, 24 h) | Blocage permanent | Un faux positif ne coupe personne durablement | Un attaquant patient reprend après expiration (piste : bannissement progressif, comme fail2ban) |
+| **Pas de blocage sur les scans** | Bloquer aussi les scans | L'IP source d'un scan peut être falsifiée : on pourrait nous faire bloquer une machine légitime | Un scanneur n'est pas stoppé, seulement signalé |
+| **Liste blanche** incluant Proxmox | Pas d'exception | Ne jamais couper l'administrateur, y compris via Tailscale | **Angle mort assumé** : une attaque passant par Tailscale arrive avec l'IP de Proxmox (NAT) et ne peut pas être bloquée |
+| **Mode simulation par défaut** | Activer directement | On vérifie d'abord qui *aurait* été bloqué, comme pour toute réponse automatique mise en production | Une étape de plus avant d'être protégé |
+
+---
+
 ## 🚀 Utilisation
 
 ### Configuration
@@ -461,6 +509,7 @@ ssh -o ConnectTimeout=5 admin@<IP_CIBLE>                                  # Conn
 - **Configuration codée en dur** : l'adresse de la cible et la liste blanche sont écrites dans les scripts ; une IP de cible qui change (DHCP) casse la réponse, d'où une réservation DHCP sur la box.
 - **Pas de blocage IPv6 testé** : le lab fonctionne en IPv4 ; le script accepte une IPv6 mais ce cas n'a pas été éprouvé.
 - **Notifications via un serveur public** : le serveur `ntfy.sh` est tiers ; les alertes (IP internes, noms d'utilisateur) y transitent. En production, il faudrait héberger son propre serveur ntfy ou protéger le sujet par authentification.
+- **Logs transmis en clair** : rsyslog envoie les logs en TCP sans chiffrement sur le réseau local ; un attaquant présent sur ce réseau pourrait les lire. rsyslog sait faire du TLS, non mis en place ici.
 - **Notifications dépendantes d'Internet** : si `siem` perd l'accès à Internet, les alertes restent dans le journal mais n'arrivent plus sur le téléphone.
 - **Attribution derrière un NAT** : les connexions qui passent par Tailscale sont « masquées » par Proxmox (SNAT) et apparaissent avec l'IP `192.168.1.200`. Le SIEM ne voit alors pas l'IP réelle de la source, un problème classique derrière les VPN, proxys et load balancers.
 - **Fenêtre de compromission courte** : un succès n'est relié qu'aux échecs des `FENETRE` dernières secondes ; un attaquant qui patiente avant de se connecter avec l'accès trouvé passerait inaperçu.
@@ -494,6 +543,23 @@ ssh -o ConnectTimeout=5 admin@<IP_CIBLE>                                  # Conn
 - [ ] Authentification et HTTPS pour le tableau de bord
 - [ ] Tests automatisés (pytest) du parseur et des règles
 - [ ] Historique des blocages dans le tableau de bord
+
+---
+
+## 🤖 Méthode de travail et apport de l'IA
+
+J'ai construit ce projet avec une IA (Claude) dans un rôle de **mentor et de relecteur** : elle expliquait les notions, proposait une démarche et relisait mon code ; j'écrivais la logique principale, je déployais et je testais chaque étape sur le lab. Le détail ci-dessous me sert aussi d'aide-mémoire.
+
+| Partie | Ce que j'ai fait | Apport de l'IA |
+|---|---|---|
+| **Infrastructure** (Proxmox, VM, rsyslog, `ufw`, SSH) | Installation, configuration, dépannage (réseau, droits, clés, services) | Commandes et explications pas à pas, aide au diagnostic |
+| **Parseur et règles de détection** | Écriture des boucles, dictionnaires et ensembles, de la fenêtre de temps et des règles brute force, compromission et scan | Expressions régulières fournies, relecture et explication des bugs |
+| **Requêtes SQL** du tableau de bord | Les 4 requêtes (compteurs, top des IP, dernières alertes, alertes par jour) | Mini-cours SQL, relecture |
+| **Script de blocage** | Validation des entrées : IP, liste blanche, durée, format de la demande | Squelette du script, appels système (`subprocess`, `systemd-run`), cas de tests d'abus |
+| **Fonctions techniques** | Intégration, déploiement et tests | Lecture continue des fichiers, envoi des notifications, stockage SQLite, page HTML et CSS du tableau de bord, générateur de données de test, `deployer.sh`, restructuration du code |
+| **Choix d'architecture** | Décisions finales : réponse automatique, durées de blocage, pas de blocage sur les scans, abaissement du seuil des scans après mesure | Propositions et analyse des risques de chaque option |
+| **Tests sur le lab** | Toutes les attaques depuis Kali, mesures (lignes de log par scan, consommation du service), constats (angle mort sur les comptes existants, NAT de Tailscale) | Interprétation des résultats |
+| **Documentation** | Relecture et validation | Rédaction des README |
 
 ---
 
