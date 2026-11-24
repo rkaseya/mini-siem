@@ -1,10 +1,12 @@
-# 🛡️ mini-SIEM : détection d'attaques par force brute SSH
+# 🛡️ mini-SIEM : détection et réponse aux intrusions en temps réel
 
-Projet personnel de cybersécurité : un **mini-SIEM** écrit en Python, qui analyse **en temps réel** des logs SSH centralisés et détecte les attaques par force brute, les **compromissions** (brute force suivi d'une connexion réussie) et les **scans de ports**. Les alertes sont envoyées sur téléphone, stockées dans SQLite et consultables dans un **tableau de bord web**.
+Projet personnel de cybersécurité : un **mini-SIEM** écrit en Python, qui analyse **en temps réel** des logs SSH centralisés et détecte les attaques par force brute, les **compromissions** (brute force suivi d'une connexion réussie) et les **scans de ports**. Les alertes sont envoyées sur téléphone, stockées dans SQLite et consultables dans un **tableau de bord web**. En cas d'attaque, il peut **bloquer automatiquement l'IP de l'attaquant** sur la machine protégée.
 
-![Tableau de bord du mini-SIEM](docs/dashboard.png) Il tourne dans un **home lab** monté de zéro, où je joue à la fois l'attaquant (Kali Linux) et le défenseur (collecte et analyse des logs).
+Il tourne dans un **home lab** monté de zéro, où je joue à la fois l'attaquant (Kali Linux) et le défenseur (collecte, analyse et réponse).
 
-> Objectif : comprendre de l'intérieur comment fonctionne un SIEM : collecte, parsing, règles de détection, gestion des faux positifs.
+![Tableau de bord du mini-SIEM](docs/dashboard.png)
+
+> Objectif : comprendre de l'intérieur comment fonctionne un SIEM : collecte, parsing, règles de détection, gestion des faux positifs, puis réponse automatique (logique SOAR).
 
 ---
 
@@ -15,7 +17,7 @@ Le lab tourne sur un mini PC (Lenovo ThinkCentre M920q) sous **Proxmox VE**, ave
 | VM | Rôle | Système |
 |---|---|---|
 | `kali` | Attaquant : génère les attaques | Kali Linux 2026.3 |
-| `ubuntu-01` | Cible : serveur SSH durci | Ubuntu Server 26.04 LTS |
+| `ubuntu-01` | Cible : serveur SSH durci, reçoit les ordres de blocage | Ubuntu Server 26.04 LTS |
 | `siem` | Collecteur : reçoit et analyse les logs | Ubuntu Server 26.04 LTS |
 
 ```mermaid
@@ -28,6 +30,8 @@ flowchart LR
     D -- écrit --> DB[(alertes.db<br/>SQLite)]
     DB -- lecture seule --> W[dashboard.py<br/>Flask + Gunicorn]
     W -- HTTP :5000<br/>réseau local --> B[🖥️ navigateur]
+    D -- SSH, clé limitée<br/>au script de blocage --> R[mini-siem-bloquer<br/>sur ubuntu-01]
+    R -- ufw deny --> U
 ```
 
 **Accès distant** : Tailscale, avec Proxmox en *subnet router*. Aucun port n'est ouvert sur la box Internet.
@@ -65,6 +69,10 @@ Les fichiers sont créés en `0640` et les dossiers en `0750`, avec le groupe `a
 | `mini-siem-dashboard.service` | Unité `systemd` du tableau de bord (Gunicorn, compte dédié en lecture seule) |
 | `outils/generer_alertes_test.py` | Génère une base d'alertes **fictives** pour développer le tableau de bord en local |
 | `docs/dashboard.png` | Capture d'écran du tableau de bord |
+| `reponse/mini-siem-bloquer` | **Script de blocage** installé sur la cible : valide la demande (IP, liste blanche, durée) puis bloque l'IP avec `ufw` et programme le déblocage |
+| `reponse/sudoers-mini-siem-reponse` | Règle `sudo` : le compte de réponse ne peut lancer que ce script |
+| `reponse/authorized_keys.exemple` | Modèle de clé SSH restreinte (commande forcée, origine limitée à `siem`) |
+| `deployer.sh` | **Déploiement en une commande** depuis le poste d'administration (vérification, envoi, installation, redémarrage) |
 | `samples/sshd-session.log` | Logs SSH d'exemple pour tester l'analyse ponctuelle en local |
 
 ---
@@ -138,6 +146,39 @@ Avant d'attaquer, un attaquant cherche les services ouverts en testant de nombre
 
 **Le seuil est adapté à la source de logs.** Pour éviter qu'un attaquant ne sature le disque, `ufw` limite ses messages (une rafale d'une dizaine, puis environ 3 par minute). Mesure dans le lab : un scan `nmap` de 1 000 ports ne laisse que **2 à 3 lignes** dès que la réserve est entamée. Un seuil de 5 ports ne déclenchait donc presque jamais ; il a été abaissé à **3 ports différents en 60 secondes**, ce qui reste rare pour une machine légitime. Les paquets sans port (ICMP, IGMP de la box) sont ignorés par le parseur.
 
+### Réponse automatique : blocage de l'attaquant
+
+Détecter ne suffit pas : pendant qu'un analyste lit l'alerte, l'attaque continue. Sur une alerte 🚨 ou 🔴, `surveillance.py` peut donc **bloquer l'IP de l'attaquant** sur le pare-feu de la cible, pour une durée limitée.
+
+```
+🚨 [2026-11-24 10:12:03] ALERTE BRUTE FORCE : 192.168.1.29 a échoué 3 fois en moins de 60 s (...)
+⛔ 192.168.1.29 bloquée pour 3600 s sur la cible (brute_force)
+```
+
+| Alerte | Réponse | Pourquoi |
+|---|---|---|
+| 🚨 Brute force | Blocage **1 heure** | Stopper l'attaque en cours, sans pénaliser durablement une erreur |
+| 🔴 Compromission | Blocage **24 heures** | Couper l'accès de l'attaquant le temps d'enquêter |
+| 🔍 Scan de ports | **Aucun blocage** | L'IP source d'un scan peut être **falsifiée** (`nmap -D`) : un attaquant pourrait nous faire bloquer une machine légitime (déni de service par notre propre défense) |
+
+#### Architecture et garde-fous
+
+`siem` envoie l'ordre par SSH au compte dédié `minisiem-reponse` de la cible, qui ne peut exécuter qu'**un seul script** : `mini-siem-bloquer`. Une réponse automatique est une arme à double tranchant ; chaque couche limite ce qu'un attaquant pourrait en faire :
+
+| Garde-fou | Ce qu'il empêche |
+|---|---|
+| **Commande forcée** (`command=` dans `authorized_keys`) | Même avec la clé volée, impossible d'exécuter autre chose que le script de blocage |
+| **Origine limitée** (`from="192.168.1.201"`) et `restrict` | La clé n'est utilisable que depuis `siem`, sans terminal ni tunnel |
+| **`sudo` limité à un seul script**, modifiable par root uniquement | Le compte de réponse n'a aucun autre privilège |
+| **Validation stricte des entrées** (`ipaddress`, durée bornée, demande exacte) | Injection de commande via une IP piégée venue des logs (`192.168.1.29;reboot`) |
+| **Commandes passées en liste** à `subprocess` (pas de shell) | Défense en profondeur contre l'injection, même si la validation était contournée |
+| **Liste blanche** (box, poste d'administration, Proxmox, `siem`) | Se couper soi-même : un test depuis le poste d'administration ou un accès via Tailscale (NAT de Proxmox) ne doit jamais bloquer l'administrateur |
+| **Blocages temporaires** (minuteur `systemd-run`) | Un faux positif ne coupe personne durablement |
+| **Mode simulation** (`MINI_SIEM_REPONSE=simulation`) | Mettre en production une réponse non vérifiée : on observe d'abord qui *aurait* été bloqué |
+| **Journalisation** de chaque blocage, déblocage et refus | Les traces partent vers `siem` : piste d'audit sur une autre machine que celle qui exécute |
+
+Tests d'abus réalisés : IP invalide, IP en liste blanche (dont `siem`), durée hors limites, durée piégée (`²`), injection (`;reboot`), commande inconnue, demande vide, argument en trop, commande arbitraire via SSH (`cat /etc/shadow`), session interactive. **Tous refusés.**
+
 ### Notifications sur téléphone
 
 Chaque alerte est aussi envoyée sur le téléphone via [ntfy](https://ntfy.sh), un service de notifications open source : une simple requête HTTPS suffit, sans bibliothèque externe (`urllib` de la bibliothèque standard).
@@ -147,6 +188,7 @@ Chaque alerte est aussi envoyée sur le téléphone via [ntfy](https://ntfy.sh),
 | 🚨 Brute force | `high` | Notification visible et sonore |
 | 🔴 Compromission | `urgent` | Notification insistante |
 | 🔍 Scan de ports | `high` | Notification visible et sonore |
+| ⛔ IP bloquée | `default` | Confirmation discrète (l'alerte a déjà été reçue) |
 
 Choix de conception :
 - **Le secret reste hors du code** : le sujet ntfy fonctionne comme un mot de passe (quiconque le connaît peut lire ou envoyer des alertes). Il est lu dans la variable d'environnement `NTFY_TOPIC`, définie dans le service `systemd`, et n'apparaît jamais dans le dépôt.
@@ -221,14 +263,29 @@ Le générateur de données de test contient volontairement une alerte « piég�
 ## 🚀 Utilisation
 
 ### Configuration
-En haut du script :
 
+**Dans `detect_bruteforce.py`** (partagé avec la surveillance) :
 ```python
 SEUIL = 3       # nombre d'échecs déclenchant une alerte
 FENETRE = 60    # durée de la fenêtre, en secondes
 ```
 
-Le fichier à analyser est passé **en argument**. Sans argument, le script lit les logs de `ubuntu-01` sur `siem` (`/var/log/remote/ubuntu-01/sshd-session.log`).
+**Dans `surveillance.py`** :
+```python
+SEUIL_PORTS = 3                                         # ports différents bloqués pour parler de scan
+CIBLE_REPONSE = "minisiem-reponse@192.168.1.28"         # compte de réponse sur la cible
+DUREES_BLOCAGE = {"brute_force": 3600, "compromission": 86400}
+```
+
+**Dans le service `mini-siem.service`** (variables d'environnement, jamais de secret dans le code) :
+
+| Variable | Rôle |
+|---|---|
+| `NTFY_TOPIC` | Sujet ntfy des notifications (à garder secret) |
+| `MINI_SIEM_DB` | Chemin de la base des alertes |
+| `MINI_SIEM_REPONSE` | `simulation` (par défaut), `active` ou `off` |
+
+Pour l'analyse ponctuelle, le fichier à analyser est passé **en argument**. Sans argument, le script lit les logs de `ubuntu-01` sur `siem` (`/var/log/remote/ubuntu-01/sshd-session.log`).
 
 ### Analyse ponctuelle sur `siem` (bilan des vrais logs)
 ```bash
@@ -270,6 +327,52 @@ sudo journalctl -u mini-siem -f
 Choix de sécurité :
 - **Moindre privilège** : le service ne tourne pas en `root`, mais sous un compte système sans shell, membre du seul groupe `adm`.
 - **Durcissement systemd** : `ProtectSystem=strict` (système en lecture seule), `ProtectHome=yes`, `PrivateTmp=yes`, `NoNewPrivileges=yes`. Même compromis, le service ne peut rien modifier.
+
+### Installer la réponse automatique
+
+**Sur la cible (`ubuntu-01`)** :
+```bash
+# Script de blocage, modifiable par root uniquement
+sudo install -o root -g root -m 755 mini-siem-bloquer /usr/local/sbin/mini-siem-bloquer
+
+# Compte dédié, sans mot de passe utilisable
+sudo useradd --system --create-home --home-dir /var/lib/minisiem-reponse --shell /bin/sh minisiem-reponse
+sudo usermod -p '*' minisiem-reponse
+
+# Droit sudo limité au seul script (voir reponse/sudoers-mini-siem-reponse)
+sudo install -m 440 sudoers-mini-siem-reponse /etc/sudoers.d/mini-siem-reponse
+sudo visudo -cf /etc/sudoers.d/mini-siem-reponse
+```
+
+**Sur `siem`**, créer la clé du service :
+```bash
+sudo -u minisiem ssh-keygen -t ed25519 -N "" -C "mini-siem-reponse" -f /var/lib/mini-siem/cle_reponse
+```
+
+**Sur la cible**, autoriser cette clé pour le seul script, sur le modèle de `reponse/authorized_keys.exemple` (fichier `/var/lib/minisiem-reponse/.ssh/authorized_keys`, droits `600`, dossier `.ssh` en `700`).
+
+**Tester depuis `siem`** avec une adresse réservée à la documentation (`203.0.113.5`) :
+```bash
+sudo -u minisiem ssh -i /var/lib/mini-siem/cle_reponse -o UserKnownHostsFile=/var/lib/mini-siem/known_hosts \
+  minisiem-reponse@192.168.1.28 "bloquer 203.0.113.5 120"
+```
+
+**Activer** : laisser tourner en `MINI_SIEM_REPONSE=simulation`, vérifier les lignes `🧪 [SIMULATION]` dans le journal, puis passer à `active` dans le service (`sudo systemctl edit --full mini-siem`, puis `daemon-reload` et `restart`).
+
+**Débloquer manuellement** une IP :
+```bash
+sudo -u minisiem ssh -i /var/lib/mini-siem/cle_reponse -o UserKnownHostsFile=/var/lib/mini-siem/known_hosts \
+  minisiem-reponse@192.168.1.28 "debloquer 192.168.1.29"
+```
+
+### Déployer une mise à jour
+
+Depuis le poste d'administration, dans le dossier du dépôt :
+```bash
+./deployer.sh             # vérifie la syntaxe, envoie, installe sur siem, redémarre les deux services
+./deployer.sh --reponse   # idem + met à jour le script de blocage sur la cible
+```
+Le script s'arrête à la première erreur (`set -euo pipefail`) : rien n'est installé si la vérification échoue.
 
 ### Activer les notifications
 1. Installer l'app **ntfy** sur le téléphone.
@@ -337,7 +440,13 @@ Depuis une machine qui possède une clé autorisée sur la cible : quelques éch
 for u in admin test oracle; do ssh -o BatchMode=yes $u@<IP_CIBLE>; done
 ssh <utilisateur>@<IP_CIBLE>
 ```
-Résultat attendu dans `journalctl -u mini-siem -f` : une alerte 🚨 puis une alerte 🔴.
+Résultat attendu dans `journalctl -u mini-siem -f` : une alerte 🚨 puis une alerte 🔴. En mode actif, depuis une IP en liste blanche, le blocage est refusé (`REFUS : IP en liste blanche`).
+
+### Tester la réponse automatique (depuis Kali)
+```bash
+for u in admin test oracle; do ssh -o BatchMode=yes $u@<IP_CIBLE>; done   # déclenche 🚨 puis ⛔
+ssh -o ConnectTimeout=5 admin@<IP_CIBLE>                                  # Connection timed out : Kali est bloquée
+```
 ⚠️ À utiliser uniquement sur ses propres machines.
 
 ---
@@ -347,11 +456,15 @@ Résultat attendu dans `journalctl -u mini-siem -f` : une alerte 🚨 puis une a
 - **Double comptage possible** : si l'authentification par mot de passe est activée, OpenSSH peut écrire `Invalid user` **et** `Failed password` pour une même tentative.
 - **Rotation des logs** : `surveillance.py` garde le fichier ouvert ; si le fichier est renommé ou recréé (logrotate), il faut redémarrer le service.
 - **État en mémoire** : les échecs récents sont perdus au redémarrage du service.
+- **Réponse contournable par changement d'IP** : un attaquant qui dispose de plusieurs adresses (VPN, botnet) reprend après chaque blocage ; le blocage ralentit l'attaque sans l'empêcher définitivement.
+- **Attaques via Tailscale non bloquables** : à cause du NAT, elles arrivent avec l'IP de Proxmox, qui est en liste blanche. C'est un compromis assumé (ne pas couper l'administrateur) qui crée un angle mort.
+- **Configuration codée en dur** : l'adresse de la cible et la liste blanche sont écrites dans les scripts ; une IP de cible qui change (DHCP) casse la réponse, d'où une réservation DHCP sur la box.
+- **Pas de blocage IPv6 testé** : le lab fonctionne en IPv4 ; le script accepte une IPv6 mais ce cas n'a pas été éprouvé.
 - **Notifications via un serveur public** : le serveur `ntfy.sh` est tiers ; les alertes (IP internes, noms d'utilisateur) y transitent. En production, il faudrait héberger son propre serveur ntfy ou protéger le sujet par authentification.
 - **Notifications dépendantes d'Internet** : si `siem` perd l'accès à Internet, les alertes restent dans le journal mais n'arrivent plus sur le téléphone.
 - **Attribution derrière un NAT** : les connexions qui passent par Tailscale sont « masquées » par Proxmox (SNAT) et apparaissent avec l'IP `192.168.1.200`. Le SIEM ne voit alors pas l'IP réelle de la source, un problème classique derrière les VPN, proxys et load balancers.
 - **Fenêtre de compromission courte** : un succès n'est relié qu'aux échecs des `FENETRE` dernières secondes ; un attaquant qui patiente avant de se connecter avec l'accès trouvé passerait inaperçu.
-- **Une seule source** : un seul fichier de log est analysé à la fois (choisi en argument).
+- **Analyse ponctuelle limitée à un fichier** : `detect_bruteforce.py` analyse un seul fichier SSH à la fois (choisi en argument) ; la surveillance en temps réel, elle, suit les logs SSH et pare-feu.
 - **Liste des utilisateurs** : elle couvre tout l'historique de l'IP, pas uniquement la rafale qui a déclenché l'alerte.
 - **Performance** : dans l'analyse ponctuelle, l'algorithme de fenêtre est en O(n²). C'est suffisant pour un lab ; la surveillance en temps réel, elle, utilise une fenêtre glissante bien plus légère.
 - **Format de log** : le parseur attend des dates ISO 8601, telles qu'écrites par rsyslog.
@@ -375,13 +488,17 @@ Résultat attendu dans `journalctl -u mini-siem -f` : une alerte 🚨 puis une a
 - [x] Stockage des alertes (SQLite)
 - [x] Tableau de bord web (Flask + Gunicorn)
 - [x] Détection de **scan de ports** (logs `ufw`)
+- [x] **Réponse automatique** : blocage temporaire de l'IP, liste blanche, mode simulation
+- [x] Script de déploiement
 - [ ] Nouvelles règles : échecs `sudo`, création d'utilisateur
 - [ ] Authentification et HTTPS pour le tableau de bord
+- [ ] Tests automatisés (pytest) du parseur et des règles
+- [ ] Historique des blocages dans le tableau de bord
 
 ---
 
 ## 🧠 Compétences mobilisées
 
-- **Systèmes & réseau** : Proxmox VE, Linux (Ubuntu, Kali), SSH, `systemd`, droits Unix, adressage IP, DHCP, VPN (Tailscale)
-- **Sécurité** : durcissement SSH, pare-feu `ufw`, reconnaissance `nmap`, centralisation de logs, ingénierie de détection, faux positifs, moindre privilège, gestion des secrets, injection SQL, XSS, durcissement `systemd`, MITRE ATT&CK
-- **Développement** : Python (expressions régulières, `datetime`, structures de données, ensembles, générateurs, modules, requêtes HTTP, gestion d'erreurs), SQL / SQLite, Flask, Jinja, Gunicorn, HTML / CSS, variables d'environnement, Git / GitHub
+- **Systèmes & réseau** : Proxmox VE, Linux (Ubuntu, Kali), SSH (clés restreintes, commandes forcées), `sudo` (`sudoers`), `systemd` (services, minuteurs), droits Unix, adressage IP, DHCP, VPN (Tailscale)
+- **Sécurité** : durcissement SSH, pare-feu `ufw`, reconnaissance `nmap`, centralisation de logs, ingénierie de détection, faux positifs, moindre privilège, gestion des secrets, injection SQL, injection de commande, XSS, durcissement `systemd`, réponse automatique (logique SOAR), MITRE ATT&CK
+- **Développement** : Python (expressions régulières, `datetime`, structures de données, ensembles, générateurs, modules, requêtes HTTP, gestion d'erreurs, `subprocess`, `ipaddress`), Bash, SQL / SQLite, Flask, Jinja, Gunicorn, HTML / CSS, variables d'environnement, Git / GitHub

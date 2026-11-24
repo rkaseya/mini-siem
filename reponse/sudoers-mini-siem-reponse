@@ -1,0 +1,7 @@
+# À installer sur la machine protégée : /etc/sudoers.d/mini-siem-reponse (droits 440)
+# Vérifier la syntaxe AVANT : sudo visudo -cf /etc/sudoers.d/mini-siem-reponse
+#
+# Le compte minisiem-reponse peut lancer UNIQUEMENT le script de blocage, en root, sans mot de passe.
+# SSH_ORIGINAL_COMMAND (la demande envoyée par siem) est conservée pour que le script puisse la lire.
+Defaults!/usr/local/sbin/mini-siem-bloquer env_keep += "SSH_ORIGINAL_COMMAND"
+minisiem-reponse ALL=(root) NOPASSWD: /usr/local/sbin/mini-siem-bloquer

@@ -1,6 +1,6 @@
 """
-surveillance.py - Surveillance en temps réel du mini-SIEM
-=========================================================
+surveillance.py - Surveillance et réponse en temps réel du mini-SIEM
+====================================================================
 
 Suit en continu les logs centralisés sur siem et lève des alertes au fil de l'eau :
 
@@ -11,11 +11,14 @@ Suit en continu les logs centralisés sur siem et lève des alertes au fil de l'
 Chaque alerte est :
     - affichée (journal système, via journalctl quand le script tourne en service) ;
     - envoyée sur le téléphone (ntfy) ;
-    - enregistrée dans la base SQLite lue par le tableau de bord.
+    - enregistrée dans la base SQLite lue par le tableau de bord ;
+    - suivie d'un blocage temporaire de l'IP sur la cible (brute force et compromission
+      uniquement), si la réponse est activée.
 
 Configuration par variables d'environnement (définies dans mini-siem.service) :
-    NTFY_TOPIC     sujet ntfy des notifications (un secret : jamais dans le code)
-    MINI_SIEM_DB   chemin de la base des alertes (par défaut : alertes.db)
+    NTFY_TOPIC          sujet ntfy des notifications (un secret : jamais dans le code)
+    MINI_SIEM_DB        chemin de la base des alertes (par défaut : alertes.db)
+    MINI_SIEM_REPONSE   "simulation" (par défaut), "active" ou "off"
 
 Utilisation :
     sudo python3 surveillance.py      # lancement manuel, arrêt avec Ctrl+C
@@ -23,6 +26,7 @@ Utilisation :
 
 import os
 import sqlite3
+import subprocess
 import time
 import urllib.request
 
@@ -40,6 +44,21 @@ from detect_bruteforce import (
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+
+# Réponse active : "simulation" (on écrit ce qu'on AURAIT fait), "active" (blocage réel) ou "off"
+MODE_REPONSE = os.environ.get("MINI_SIEM_REPONSE", "simulation")
+
+# Connexion à la machine protégée : compte dédié, clé limitée au script de blocage
+CIBLE_REPONSE = "minisiem-reponse@192.168.1.28"
+CLE_REPONSE = "/var/lib/mini-siem/cle_reponse"
+HOTES_CONNUS = "/var/lib/mini-siem/known_hosts"
+
+# Durée de blocage par type d'alerte, en secondes. Pas de blocage sur un scan :
+# l'IP source d'un scan peut être falsifiée, un attaquant pourrait nous faire bloquer n'importe qui.
+DUREES_BLOCAGE = {
+    "brute_force": 3600,      # 1 heure
+    "compromission": 86400,   # 24 heures
+}
 
 # Fichiers surveillés : authentification SSH et blocages du pare-feu (log du noyau)
 FICHIER_SSH = FICHIER_PAR_DEFAUT
@@ -122,7 +141,7 @@ def lever_alerte(moment, type_alerte, ip, utilisateur, nombre, methode, message,
     print(message)
     notifier(titre, message, priorite, tags)
     enregistrer_alerte(moment, type_alerte, ip, utilisateur, nombre, methode, message)
-
+    
 
 # ---------------------------------------------------------------------------
 # Lecture des logs en continu
@@ -150,6 +169,51 @@ def suivre_plusieurs(chemins):
     finally:
         for fichier in fichiers:            # à l'arrêt (Ctrl+C), on referme proprement
             fichier.close()
+
+
+# ---------------------------------------------------------------------------
+# Réponse aux alertes (blocage de l'IP sur la cible)
+# ---------------------------------------------------------------------------
+
+def repondre(ip, type_alerte):
+    """Bloque l'IP sur la machine protégée selon le type d'alerte (ou simule le blocage).
+
+    L'ordre passe par SSH avec une clé dédiée, limitée côté cible au script
+    mini-siem-bloquer, qui revalide tout (IP, liste blanche, durée).
+    """
+    duree = DUREES_BLOCAGE.get(type_alerte)
+
+    if duree is None:
+        return
+    if MODE_REPONSE == "off":
+        return
+    if MODE_REPONSE == "simulation":
+        print(f"🧪 [SIMULATION] {ip} aurait été bloquée pour {duree} s ({type_alerte})")
+        return
+    
+    # Mode "active" : envoi de l'ordre de blocage. Commande passée en liste : aucun shell local.
+    commande = [
+        "ssh", "-i", CLE_REPONSE,
+        "-o", f"UserKnownHostsFile={HOTES_CONNUS}",
+        "-o", "BatchMode=yes",        # jamais de question interactive : le service tourne seul
+        "-o", "ConnectTimeout=5",     # ne pas bloquer la surveillance si la cible ne répond pas
+        CIBLE_REPONSE, f"bloquer {ip} {duree}",
+    ]
+    try:
+        resultat = subprocess.run(commande, capture_output=True, text=True, timeout=15)
+    except subprocess.TimeoutExpired:
+        print(f"⚠️  Réponse impossible : la cible ne répond pas (blocage de {ip})")
+        return
+
+    if resultat.returncode == 0:
+        # Succès : le script a bloqué l'IP
+        message = f"⛔ {ip} bloquée pour {duree} s sur la cible ({type_alerte})"
+        print(message)
+        notifier("IP bloquee", message, "default", "no_entry")
+    else:
+        # Échec : le script a refusé (liste blanche, IP invalide...) ou une erreur s'est produite
+        raison = resultat.stdout.strip() or resultat.stderr.strip()
+        print(f"⚠️  Blocage de {ip} refusé ou échoué : {raison}")
 
 
 def dans_fenetre(moment, autre_moment):
@@ -219,6 +283,7 @@ def main():
                                f"après {len(recents)} échecs en moins de {FENETRE} s")
                     lever_alerte(moment, "compromission", ip, utilisateur, len(recents), methode, message,
                                  "COMPROMISSION", "urgent", "red_circle")
+                    repondre(ip, "compromission")
                 continue   # une ligne de succès n'est pas un échec : on passe à la suivante
 
             # --- 🚨 Échec de connexion SSH : brute force ? --------------------
@@ -242,6 +307,7 @@ def main():
                                f"(dernier utilisateur visé : {utilisateur})")
                     lever_alerte(moment, "brute_force", ip, utilisateur, len(horaires[ip]), None, message,
                                  "Brute force", "high", "rotating_light")
+                    repondre(ip, "brute_force")
                     derniere_alerte[ip] = moment
 
     except KeyboardInterrupt:

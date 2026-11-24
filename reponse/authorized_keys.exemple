@@ -1,0 +1,6 @@
+# À installer sur la machine protégée : /var/lib/minisiem-reponse/.ssh/authorized_keys (droits 600)
+# Remplacer la clé par le contenu de /var/lib/mini-siem/cle_reponse.pub (sur siem), sur UNE seule ligne.
+#   command="..."  : quelle que soit la demande, seul le script de blocage s'exécute
+#   from="..."     : la clé n'est acceptée que depuis siem
+#   restrict       : ni terminal, ni tunnel, ni transfert de ports
+restrict,from="192.168.1.201",command="sudo /usr/local/sbin/mini-siem-bloquer" ssh-ed25519 AAAA...remplacer-par-la-cle-publique... mini-siem-reponse

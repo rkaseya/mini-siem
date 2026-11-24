@@ -1,5 +1,5 @@
 [Unit]
-Description=Mini-SIEM - détection de brute force SSH en temps réel
+Description=Mini-SIEM - détection et réponse aux intrusions en temps réel
 After=network.target rsyslog.service
 
 [Service]
@@ -15,6 +15,15 @@ RestartSec=5
 # Le sujet sert de "mot de passe" : ne jamais publier le vrai dans le dépôt.
 # Générer un sujet aléatoire : echo "mini-siem-$(openssl rand -hex 6)"
 Environment=NTFY_TOPIC=remplacer-par-votre-sujet
+
+# Base des alertes : seul dossier où le service peut écrire (créé par systemd)
+StateDirectory=mini-siem
+Environment=MINI_SIEM_DB=/var/lib/mini-siem/alertes.db
+
+# Réponse aux alertes : "simulation" (on journalise ce qu'on AURAIT bloqué),
+# "active" (blocage réel de l'IP sur la cible) ou "off".
+# Toujours commencer par "simulation" pour vérifier qui serait bloqué.
+Environment=MINI_SIEM_REPONSE=simulation
 
 # Durcissement : le service ne peut que lire, rien modifier
 NoNewPrivileges=yes

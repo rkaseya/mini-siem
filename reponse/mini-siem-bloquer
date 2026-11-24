@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+"""
+mini-siem-bloquer - Réponse active du mini-SIEM (à installer sur la machine protégée)
+=====================================================================================
+
+Bloque une IP sur le pare-feu ufw pendant une durée limitée, puis la débloque
+automatiquement. Appelé par siem via SSH, avec une clé limitée à cette seule commande.
+
+Commandes acceptées :
+    bloquer <ip> <durée en secondes>
+    debloquer <ip>
+
+Toutes les entrées sont considérées comme HOSTILES : l'IP vient des logs, donc
+potentiellement d'un attaquant. Tout ce qui n'est pas strictement valide est refusé.
+"""
+
+import ipaddress
+import os
+import subprocess
+import sys
+import syslog
+
+# IP et réseaux qu'on ne bloque JAMAIS, même sur alerte (sinon on se coupe soi-même)
+LISTE_BLANCHE = [
+    ipaddress.ip_network("127.0.0.0/8"),      # la machine elle-même
+    ipaddress.ip_network("192.168.1.1/32"),   # la box Internet
+    ipaddress.ip_network("192.168.1.14/32"),  # le Mac d'administration
+    ipaddress.ip_network("192.168.1.200/32"), # Proxmox (et les accès via Tailscale, à cause du NAT)
+    ipaddress.ip_network("192.168.1.201/32"), # siem : sinon il ne pourrait plus débloquer
+]
+
+DUREE_MIN = 60       # 1 minute
+DUREE_MAX = 86400    # 24 heures
+
+
+def journaliser(message):
+    """Écrit dans les logs d'authentification : ils sont transmis à siem (traçabilité)."""
+    syslog.openlog("mini-siem-reponse", facility=syslog.LOG_AUTH)
+    syslog.syslog(message)
+    print(message)
+
+
+def refuser(raison):
+    """Refuse la demande : on la journalise (c'est peut-être une tentative d'abus) et on s'arrête."""
+    journaliser(f"REFUS : {raison}")
+    sys.exit(1)
+
+
+def lire_demande():
+    """Renvoie la liste des mots de la demande.
+
+    Appelé via SSH : la demande est dans SSH_ORIGINAL_COMMAND (ex : "bloquer 192.168.1.29 3600").
+    Appelé localement (déblocage programmé) : la demande est dans les arguments.
+    """
+    if "SSH_ORIGINAL_COMMAND" in os.environ:
+        return os.environ["SSH_ORIGINAL_COMMAND"].split()
+    return sys.argv[1:]
+
+
+def valider_ip(texte):
+    """Renvoie l'IP si elle est valide et hors liste blanche. Sinon, refuse la demande."""
+    try:
+        adresse_ip = ipaddress.ip_address(texte)
+    except ValueError:
+        refuser(f"IP invalide: {texte!r}")
+
+    # "ip in reseau" : l'IP fait-elle partie de ce réseau ? (on teste chaque réseau de la liste)
+    for reseau in LISTE_BLANCHE:
+        if adresse_ip in reseau:
+            refuser(f"IP en liste blanche: {adresse_ip}")
+
+    return str(adresse_ip)
+
+
+def valider_duree(texte):
+    """Renvoie la durée en secondes si elle est valide. Sinon, refuse la demande."""
+    # isascii() en plus de isdigit() : "²" passe isdigit() mais n'est pas un nombre
+    if not (texte.isascii() and texte.isdigit()):
+        refuser(f"Durée non numérique : {texte!r}")
+
+    duree = int(texte)
+    if not DUREE_MIN <= duree <= DUREE_MAX:
+        refuser(f"Durée hors limites : {duree} s (autorisé : {DUREE_MIN} à {DUREE_MAX} s)")
+
+    return duree
+
+
+def nom_minuteur(ip):
+    """Nom du minuteur systemd de déblocage pour cette IP (ex : mini-siem-debloquer-192-168-1-29)."""
+    return "mini-siem-debloquer-" + ip.replace(".", "-")
+
+
+def bloquer(ip, duree):
+    """Bloque l'IP avec ufw, puis programme son déblocage dans <duree> secondes."""
+    # Les commandes sont passées en LISTE, jamais en texte : aucun shell n'interprète
+    # les arguments, donc aucune injection de commande possible.
+    subprocess.run(["ufw", "insert", "1", "deny", "from", ip], check=True)
+
+    # Si un déblocage était déjà programmé pour cette IP, on le remplace par le nouveau
+    subprocess.run(["systemctl", "stop", f"{nom_minuteur(ip)}.timer"], check=False,
+                   stderr=subprocess.DEVNULL)
+    subprocess.run(["systemd-run", f"--unit={nom_minuteur(ip)}", f"--on-active={duree}",
+                    sys.argv[0], "debloquer", ip], check=True)
+    journaliser(f"BLOCAGE : {ip} pour {duree} s")
+
+
+def debloquer(ip):
+    """Supprime la règle de blocage de l'IP."""
+    subprocess.run(["ufw", "delete", "deny", "from", ip], check=True)
+    journaliser(f"DEBLOCAGE : {ip}")
+
+
+def main():
+    demande = lire_demande()
+
+    # On vérifie le NOMBRE de mots avant d'y accéder : une demande vide ne fait pas planter le script.
+    # Tout ce qui n'est pas exactement "bloquer <ip> <durée>" ou "debloquer <ip>" est refusé.
+    if len(demande) == 3 and demande[0] == "bloquer":
+        _, ip, duree = demande
+        bloquer(valider_ip(ip), valider_duree(duree))
+    elif len(demande) == 2 and demande[0] == "debloquer":
+        _, ip = demande
+        debloquer(valider_ip(ip))
+    else:
+        refuser(f"Demande inconnue: {demande!r}")
+
+
+if __name__ == "__main__":
+    main()
